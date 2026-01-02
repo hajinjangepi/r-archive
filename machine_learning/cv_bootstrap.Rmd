@@ -1,0 +1,154 @@
+---
+title: "Cross Validation and Bootstrap"
+author: "Hajin Jang"
+date: "11/14/2025"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+## Concepts
+
+### k-fold cross validation
+
+#### Explanation on how k-fold cross-validation is implemented.
+
+K-fold cross-validation divides the dataset of n observations into k distinct, non-overlapping subsets. Each of these groups acts as a validation set and the remainder as a training set. The test error is estimated by averaging the k resulting MSE estimates.
+
+
+#### Pros and cons of of k-fold cross-validation relative to:
+
+##### The validation set approach
+
+The validation set approach is a simple and intuitive method that involves splitting the available data into two subsets: one for training and the other for validation. While easy to implement, it has notable drawbacks. First, the estimated test error can vary considerably depending on how the data are divided between the training and validation sets. Second, because the model is trained on only a portion of the data, the validation error often overestimates the true test error that would be obtained if the model were trained on the full dataset. Despite these limitations, the approach is computationally efficient since it requires fitting only one model.
+
+
+##### LOOCV
+
+LOOCV is a special case of k-fold cross-validation where k equals the number of observations (n). In this approach, the model is trained n times, each time leaving out one observation for validation and using the remaining n–1 for training. Because each model differs only by a single observation, the fitted models are highly similar, which can lead to high variance in the estimated test error, especially compared to k-fold CV. However, LOOCV generally produces estimates with lower bias since almost all data are used for training. Despite its accuracy advantage, it is computationally expensive because it requires fitting the model n separate times.
+
+
+
+## Simulation and cross validation
+
+#### Generating a simulated dataset
+
+```{r}
+set.seed(1)
+x <- rnorm(100)
+y <- x-2*x^2+rnorm(100)
+
+check <- data.frame(x-x, x2=x^2, y=y)
+summary(check)
+```
+
+**Comment:** $n$ is 100 and $p$ is 2 because the model includes two parameters, x and x^2. There are 100 observations. The model equation is: $$y = -2x^2 + x + \epsilon$$. 
+
+
+#### Scatterplot
+
+```{r}
+plot(x,y)
+```
+
+**Comment:** I found that $y$ has a (negative) quadratic relationship with $x$.
+
+
+#### LOOCV errors
+
+##### i.   $Y = \beta_0 + \beta_1 X + \epsilon$
+##### ii.  $Y = \beta_0 + \beta_1 X + \beta_2 X^2 + \epsilon$
+##### iii. $Y = \beta_0 + \beta_1 X + \beta_2 X^2 + \beta_3 X^3 + \epsilon$
+##### iv.  $Y = \beta_0 + \beta_1 X + \beta_2 X^2 + \beta_3 X^3 + \beta_4 X^4 + \epsilon$
+
+```{r}
+library(boot)
+set.seed(100)
+dat <- data.frame(x, y)
+sapply(1:4, function(i) cv.glm(dat, glm(y ~ poly(x, i)))$delta[1])
+```
+
+
+#### 5-fold cv
+
+```{r}
+library(caret)
+
+set.seed(100)
+
+dat <- data.frame(x, y)
+ctrl <- trainControl(method = "cv", number = 5)
+
+fit1 <- train(y ~ poly(x, 1), data = dat, method = "lm", trControl = ctrl)
+fit2 <- train(y ~ poly(x, 2), data = dat, method = "lm", trControl = ctrl)
+fit3 <- train(y ~ poly(x, 3), data = dat, method = "lm", trControl = ctrl)
+fit4 <- train(y ~ poly(x, 4), data = dat, method = "lm", trControl = ctrl)
+
+results <- data.frame(
+  Degree = 1:4,
+  RMSE = c(fit1$results$RMSE, fit2$results$RMSE, fit3$results$RMSE, fit4$results$RMSE),
+  Rsquared = c(fit1$results$Rsquared, fit2$results$Rsquared, fit3$results$Rsquared, fit4$results$Rsquared)
+)
+results
+```
+
+**Comment:** Based on the 5-fold cross-validation results, the model with degree 2 had the lowest RMSE (0.967) and the highest \( R^2 \) (0.867), indicating the best performance among all tested models. Higher-order models (degree 3 and 4) showed slightly higher RMSE values and did not improve \( R^2 \), suggesting possible overfitting without additional predictive benefit.  
+These findings are consistent with the LOOCV results, where the second-degree polynomial model also performed best. Both methods identify the quadratic model as optimal because the true data-generating mechanism is \( y = x - 2x^2 + \epsilon \).  
+The small differences in error estimates between LOOCV and 5-fold CV are due to their different resampling strategies. LOOCV uses almost all data points for training each time, which results in lower bias but higher variance, while 5-fold CV has slightly higher bias and lower variance. Despite these differences, both methods lead to the same overall conclusion.
+
+
+#### Model comparison
+The model with degree 2 had the smallest error, which is exactly what I expected. The data were generated from the true model \( y = x - 2x^2 + \epsilon \), which is a quadratic relationship. Therefore, a second-degree polynomial model should provide the best fit.  
+
+In both LOOCV and 5-fold CV, the degree 2 model achieved the lowest prediction error, while models of degree 1 underfit the data and models of degree 3 and 4 slightly overfit. This consistency across cross-validation methods shows that the quadratic model correctly captures the underlying pattern in the data.
+
+
+#### Statistical significance 
+
+```{r}
+for (i in 1:4) printCoefmat(coef(summary(glm(y ~ poly(x, i), data = dat))))
+```
+
+**Comment:** The linear model has a significant coefficient for x (0.019<0.05), so a straight line already explains some of the variation in y. The quadratic model has. both the linear term and the quadratic term highly significant. For the cubic and quartic models, the additional higher order terms are not significant (p=0.7844 for the cubic term and p=0.1931 for the quartic term), so these extra terms do not improve the model.
+This pattern is consistent with the cross validation results, which indicated that the quadratic model is the most appropriate: the linear model captures partly about the signal, but the quadratic model captures it better, and adding higher order terms does not help.
+
+
+## Bootstrapping with logistic regression
+
+#### Estimated ste
+
+```{r}
+library(ISLR2)
+set.seed(100)
+
+fit <- glm(default ~ income + balance, data = Default, family = "binomial")
+summary(fit)
+```
+
+The estimated standard errors are $\beta_1$ = 4.985e-06 and $\beta_2$ = 2.274e-04.
+
+
+#### boot.fn() function
+
+```{r}
+boot.fn = function(data, index) return(coef(glm(default ~ income + balance, 
+    data = data, family = binomial, subset = index)))
+```
+
+
+#### Logistic regression coefficients ste
+
+```{r}
+library(boot)
+set.seed(100)
+boot(Default, boot.fn, 50)
+```
+
+**Comment:**
+The standard errors obtained by bootstrapping are similar to those estimated by `glm`. 
+The estimated standard errors obtained using the `glm()` function were 4.985e-06 for `income` and 2.274e-04 for `balance`. From the bootstrap function, the corresponding standard errors were 4.843e-06 for `income` and 2.638e-04 for `balance`.  
+
+These values are quite similar, indicating that the model is stable and the standard error estimates from the analytical method (`glm()`) closely match those derived from the resampling function. The small differences are expected because the bootstrap method relies on repeated random sampling, while the `glm()` method uses asymptotic theory. Both methods confirm that `balance` has a much larger and more variable effect than `income`.
+
+

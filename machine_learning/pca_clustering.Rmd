@@ -1,0 +1,138 @@
+---
+title: "PCA and Clustering (optimal multiple testing)"
+author: "Hajin Jang"
+date: "12/9/2025"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+
+## Hierarchical clustering
+
+#### Data
+
+```{r}
+library(ISLR2)
+data("USArrests")
+
+str(USArrests)
+summary(USArrests)
+apply(USArrests,2,sd)
+```
+
+#### Hierarchical clustering with complete linkage and Euclidean distance
+
+```{r}
+# Distance matrix using Euclidean distance
+usa.dist <- dist(USArrests)
+
+# Hierarchical clustering with complete linkage
+hc.complete <- hclust(usa.dist, method = "complete")
+
+# Dendrogram
+plot(hc.complete, main = "USArrests: Complete linkage, unscaled")
+```
+
+
+#### Cutting the dendrogram (3-distinct clusters)
+
+```{r}
+# Cut tree to obtain 3 clusters
+hc3 <- cutree(hc.complete, k = 3)
+
+# Cluster membership
+hc3
+# Size of each cluster
+table(hc3)
+
+# Summarize the original variables by cluster
+cluster.summary <- aggregate(USArrests, by = list(cluster = hc3), FUN = mean)
+cluster.summary
+```
+
+**Comment:**
+After cutting the dendrogram to obtain three clusters, we observed a separation of the states based on the levels of violent crime rates. The resulting cluster membership was as follows: Cluster 1 = 16 states, Cluster 2 = 14 states, and Cluster 3 = 20 states. 
+
+Cluster 1 shows the highest overall crime rates among the three groups. The average Murder (11.81), Assault (272.56), and Rape (28.38) values are substantially higher than those of the other clusters. UrbanPop is moderately high (68.31). Overall, states in Cluster 1 represent high-crime states with elevated levels across all violent crime indicators.
+
+Cluster 2 represents a moderate-crime group. The mean values for Murder (8.21), Assault (173.29), and Rape (22.84) are consistently lower than Cluster 1 but higher than Cluster 3. UrbanPop is highest here (70.64), suggesting that these states tend to be more urban but do not necessarily exhibit the highest crime rates. Thus, Cluster 2 reflects states with intermediate violent crime rates and relatively higher urban populations.
+
+Cluster 3 contains states with the lowest crime levels. The average Murder rate was 4.27, Assault 87.55, and Rape 14.39, all substantially lower than in the other clusters. UrbanPop is also lower (59.75), indicating that these states tend to be less urbanized. Cluster 3 therefore represents low-crime, more rural states.
+
+
+#### c. Hierarchical clustering, after scaling
+
+```{r}
+# Scale variables to have sd = 1
+usa.scaled <- scale(USArrests, center = FALSE, scale = TRUE)
+
+# Check sd = 1
+apply(usa.scaled, 2, sd)
+
+# Distance matrix and hierarchical clustering on scaled data
+usa.scaled.dist <- dist(usa.scaled)
+hc.complete.sd  <- hclust(usa.scaled.dist, method = "complete")
+
+plot(hc.complete.sd, main = "USArrests: Complete linkage, scaled (sd = 1)")
+```
+
+**Comment:**
+Scaling the variables has a substantial effect on the hierarchical clustering results. In the original dataset, the variables have very different scales and variances (e.g., Assault has a much larger variance than other variables). Without scaling, variables with larger spread dominate the Euclidean distance calculation, causing the clustering solution to primarily reflect those high-variance variables.
+
+After scaling the variables to have standard deviation equal to 1, all four features contribute equally to the distance metric. As a result, the structure of the dendrogram changes a lot: states are grouped based on a more balanced combination of Murder, Assault, UrbanPop, and Rape, rather than being driven disproportionately by a single variable. The heights of the merges also become more comparable, and the clusters appear more stable and interpretable.
+
+In my opinion, the variables should be scaled before computing inter-observation dissimilarities in this setting. Because hierarchical clustering relies directly on Euclidean distance, differences in scale can bias the distance measure and produce misleading clusters. Scaling prevents any one variable from dominating the analysis and ensures that the clustering structure reflects the combined patterns across all variables.
+
+
+#### PCA (scale and center)
+
+```{r}
+# PCA with centering and scaling
+usa.pca <- prcomp(USArrests, center = TRUE, scale = TRUE)
+summary(usa.pca)
+
+# Proportion and cumulative proportion of variance explained
+usa.pca$importance <- summary(usa.pca)$importance
+usa.pca$importance   
+biplot(usa.pca, scale=0)
+
+# Factor loadings (all components)
+usa.pca$rotation
+```
+
+**Comment:**
+From the PCA output, PC1 + PC2 explain 0.62006 + 0.24744 = 0.86750 (86.75%). Therefore, the first two principal components are sufficient to explain more than 75% of the total variation in the data.
+
+The factor loadings show that PC1 places large negative weights on Murder, Assault, and Rape, with a smaller contribution from UrbanPop. This indicates that PC1 primarily represents an overall violent-crime severity dimension, where states with high crime rates score lower and low-crime states score higher. PC2, which explains an additional 24.7% of the variance, is dominated by a strong positive loading on UrbanPop, while the crime variables load moderately negatively. Thus, PC2 reflects an urbanization gradient that separates highly urbanized states from more rural states, largely independent of their overall crime levels. PC3, driven by a large negative loading on Rape and moderate positive loadings on Murder and UrbanPop, captures differences in the pattern of crime types across states—specifically, a contrast between Rape rates and the combination of Murder and urbanization. Finally, PC4 explains only a small fraction of variance and primarily contrasts Murder and Assault, representing a minor residual dimension after the major patterns have been accounted for. Overall, the PCA shows that most of the meaningful structure in the dataset can be understood through the first two components, which summarize general crime severity and urbanization patterns across U.S. states.
+
+
+#### Hierarchical clustering on the PCs
+
+```{r}
+# Take the first 2 principal component scores
+pc.scores <- usa.pca$x[, 1:2]
+
+# Distance matrix
+pc.dist <- dist(pc.scores)
+hc.pc.comp <- hclust(pc.dist, method = "complete")
+
+plot(hc.pc.comp, main = "USArrests: Complete linkage on first two PCs")
+
+# Cut to 3 clusters
+pc.hc3 <- cutree(hc.pc.comp, k = 3)
+table(pc.hc3)
+
+# Summarize original variables by PC based clusters
+pc.cluster.summary <- aggregate(USArrests, by = list(cluster = pc.hc3), FUN = mean)
+pc.cluster.summary
+```
+
+**Comment:**
+Hierarchical clustering was performed using the first two principal component scores, which together capture 86.75% of the total variation in the dataset. The resulting dendrogram shows three clear groups when cut at k=3, with cluster sizes of 8, 11, and 31 states. 
+
+Summarizing the original variables within each PC-based cluster shows distinct crime and demographic profiles. Cluster 2 represents the highest crime, most urban group: it has the highest mean Assault rate (about 264 per 100,000), the highest Rape rate (about 32.6), and the highest UrbanPop (about 79 percent), with a moderately high Murder rate (about 11.1). Cluster 1 is also a high crime group but with a slightly different profile: it has the highest mean Murder rate (about 14.1) and a high Assault rate (about 252.8), but lowest UrbanPop (about 53.5) and somewhat lower Rape (about 24.5) than cluster 2, suggesting less urban states with particularly elevated homicide. Cluster 3 contains the majority of states and corresponds to a relatively low crime group: it has by far the lowest Murder (about 5.0) and Assault (about 116.5) rates and the lowest Rape rate (about 16.3), with an intermediate level of UrbanPop (about 63.8). Overall, clustering the states in the space defined by the first two principal components organizes them primarily along gradients of overall violent crime level and urbanization, separating high homicide states, highly urban high assault and rape states, and a large group of relatively low crime states.
+
+
+

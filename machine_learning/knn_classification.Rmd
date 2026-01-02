@@ -1,0 +1,256 @@
+---
+title: "KNN Classification"
+author: "Hajin Jang"
+date: "10/1/2025"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+## KNN Classification 
+
+```{r}
+library(ISLR2)
+library(FNN)
+library(caret)
+library(tidyverse)
+head(Carseats)
+```
+
+
+#### Training and validation sets (70%/30%)
+
+```{r}
+set.seed(0911)
+train <- sample(1:nrow(Carseats), size=ceiling(nrow(Carseats)*.7))
+```
+
+```{r}
+str(train)
+length(train)
+train[1:10]
+length(train)/nrow(Carseats)
+```
+
+
+#### Preprocessing
+
+##### One-hot coding
+
+```{r}
+Carseats.xmat <- model.matrix(ShelveLoc~., data=Carseats[,-c(2:5, 8:9)])
+str(Carseats.xmat)
+```
+
+```{r}
+Carseats.xmat[1:10,]
+```
+
+```{r}
+Carseats.xmat <- Carseats.xmat[,-1]
+```
+
+##### Standardization
+
+```{r}
+Carseats.xmat[1:10,] 
+Carseats.XConTr <- Carseats.xmat[train,1:2]
+Carseats.XCatTr <- Carseats.xmat[train,3:4]
+```
+
+```{r}
+preProcVals<- preProcess(Carseats.XConTr, method=c("center", "scale")) 
+str(preProcVals)
+```
+
+```{r}
+Carseats.XConTrZ <- predict(preProcVals, Carseats.XConTr)
+Carseats.XTrZ <- cbind(Carseats.XConTrZ, Carseats.XCatTr)
+```
+
+```{r}
+dim(Carseats.XTrZ)
+Carseats.XTrZ[1:5,]
+summary(Carseats.XTrZ)
+```
+
+##### Validation set
+
+```{r}
+Carseats.XConVal <- Carseats.xmat[-train,1:2]
+Carseats.XCatVal <- Carseats.xmat[-train,3:4]
+Carseats.XConValZ <- predict(preProcVals, Carseats.XConVal)
+Carseats.XValZ <- cbind(Carseats.XConValZ, Carseats.XCatVal)
+dim(Carseats.XValZ)
+```
+
+```{r}
+Carseats.XValZ[1:5,]
+summary(Carseats.XValZ)
+```
+
+##### Update Y vector
+
+```{r}
+Carseats.YTr <- Carseats$ShelveLoc[train]
+Carseats.YVal <- Carseats$ShelveLoc[-train]
+```
+
+
+#### Performing KNN regression
+
+```{r}
+mKnnClass <- function(trainDat, validDat, trainOut, validOut, k){
+ confKNN <- list(NA, times=length(k))
+ accKNN <- rep(NA, times=length(k))
+ for (i in 1:length(k)) {
+ out <- knn(train=trainDat, test=validDat, cl=trainOut, k=k[i])
+ confKNN[[i]] <- confusionMatrix(out, validOut) 
+ accKNN[i] <- confKNN[[i]]$overall[1]
+ }
+ return(list(conf=confKNN, accuracy=accKNN))
+}
+
+Kvec <- 1:20
+
+confKNN <- mKnnClass(trainDat=Carseats.XTrZ, validDat=Carseats.XValZ, trainOut=Carseats.YTr, validOut=Carseats.YVal, k=Kvec)
+
+str(confKNN[[2]])
+```
+
+
+#### Plotting K vs. misclassification (1-accuracy)
+
+```{r}
+acc <- confKNN[[2]]
+misclass <- 1-acc
+
+plot(Kvec, misclass, type="l", xlab="K", ylab="Misclassification rate", xlim=c(min(Kvec), max(Kvec)))
+```
+
+```{r}
+kopt <- which.max(confKNN[[2]])
+kopt
+```
+
+```{r}
+confKNNopt <- mKnnClass(trainDat=Carseats.XTrZ, validDat=Carseats.XValZ, trainOut=Carseats.YTr, validOut=Carseats.YVal, k=kopt)
+
+outFinal <- knn(train=Carseats.XTrZ, test=Carseats.XValZ, cl=Carseats.YTr, k=kopt)
+
+confKNNopt[[1]]
+confKNNopt[[2]]
+```
+
+
+#### Interpretation
+
+##### Sales
+
+```{r}
+plotdat <- data.frame(Sales=Carseats$Sales[-train], Price=Carseats$Price[-train], Urban=Carseats$Urban[-train], US=Carseats$US[-train], PredShelveLocCat=outFinal)
+
+boxplot(plotdat$Sales~plotdat$PredShelveLocCat, xlab="Shelf Location Category", ylab="Sales")
+```
+    
+Bad shelf location: Sales span from roughly 2 to 10, with a median near 4. The distribution is highly variable but tends to be lower overall compared with other shelf placements.
+
+Good shelf location: Sales fall between about 9 and 14, with a median close to 12. This indicates that products in “Good” shelf spots are more likely to achieve higher sales, and the lower variability suggests more consistent performance.
+
+Medium shelf location: Sales range from 4 to 12, with a median around 7. Variability is moderate, and performance lies between that of the “Bad” and “Good” shelf placements in both range and median.
+
+Overall pattern: Higher sales are generally linked to “Good” shelf locations, lower sales to “Bad” locations, and “Medium” shelves occupy the middle ground in terms of sales levels and consistency.
+
+##### Price
+
+```{r}
+boxplot(plotdat$Price~plotdat$PredShelveLocCat, xlab="Shelf Location Category", ylab="Price")
+```
+
+Bad shelf location: Prices range from 55 to 160, with a median near 110. The distribution is wide, and the median price is slightly higher than that of the “Good” shelf category.
+
+Good shelf location: Prices range from 60 to 155, but the median is the lowest among the three groups, around 95.
+
+Medium shelf location: Prices range from 80 to 170, with the highest median at about 120. The distribution is narrower than in the “Bad” and “Good” categories, suggesting less variability.
+
+Overall trend: Higher prices are more associated with the “Medium” shelf placements, lower prices are concentrated in “Good” shelves, and “Bad” shelves show a wide price spread with a median that sits between the other two.
+
+##### Urban
+
+```{r}
+UrbanCat <- table(plotdat$Urban, plotdat$PredShelveLocCat)
+UrbanCat
+```
+
+```{r}
+UrbanDat <- matrix(c(UrbanCat, rep(levels(plotdat$PredShelveLocCat), each=2), rep(levels(plotdat$Urban), times=3)), nrow=6, ncol=3 )
+UrbanDF <- data.frame(UrbanDat)
+names(UrbanDF) <- c("Count", "Predicted_Shelf_Location", "Urban")
+
+UrbanDF[,2]<- as.factor(UrbanDF[,2])
+UrbanDF[,2] <- factor(UrbanDF[,2], levels(UrbanDF[,2])[c(1,3,2)])
+UrbanDF[,3]<- as.factor(UrbanDF[,3])
+UrbanDF$Count <- as.numeric(UrbanDF$Count)
+
+ggplot(UrbanDF, aes(fill=Predicted_Shelf_Location, y=Count, x=Urban)) +
+ geom_bar(position="Fill", stat="identity")
+```
+
+In both urban and non-urban settings, most predicted shelf placements fall into the Medium category. Good shelf placements make up about 13% in each setting. Urban areas have a slightly larger share of Bad shelf placements than non-urban areas, where they are less frequent.
+
+Overall, Medium shelf placements are the most common across both areas, Good placements remain consistent, and Bad placements appear more often in urban than in non-urban locations.
+
+##### US
+
+```{r}
+USCat <- table(plotdat$US, plotdat$PredShelveLocCat)
+USCat
+```
+
+```{r}
+USDat <- matrix(c(USCat, rep(levels(plotdat$PredShelveLocCat), each=2), rep(levels(plotdat$US), times=3)), nrow=6, ncol=3 )
+USDF <- data.frame(USDat)
+names(USDF) <- c("Count", "Predicted_Shelf_Location", "US")
+
+USDF[,2]<- as.factor(USDF[,2])
+USDF[,2] <- factor(USDF[,2], levels(USDF[,2])[c(1,3,2)])
+USDF[,3]<- as.factor(USDF[,3])
+USDF$Count <- as.numeric(USDF$Count)
+
+ggplot(USDF, aes(fill=Predicted_Shelf_Location, y=Count, x=US)) +
+ geom_bar(position="Fill", stat="identity")
+```
+
+
+#### Multinomial logistic model
+
+```{r}
+library(nnet)
+
+mlr_mdl <- multinom(formula= ShelveLoc~Sales+Price+Urban+US, data=Carseats, subset=train)
+
+summary_model <- summary(mlr_mdl)
+```
+
+```{r}
+z_values <- summary_model$coefficients / summary_model$standard.errors
+p_values <- 2 * (1 - pnorm(abs(z_values)))
+p_values
+```
+
+```{r}
+pred <- predict(mlr_mdl, Carseats[-train,])
+
+mlr_mdl_tab<- table(pred=pred, true=Carseats$ShelveLoc[-train])
+
+mlr_mdl_conf<-confusionMatrix(mlr_mdl_tab)
+mlr_mdl_conf
+```
+
+**Comment:** The multinomial logistic regression model has a higher overall accuracy of 63.33%, compared to 57.5% for the KNN model. This suggests that multinomial logistic regression is more effective at correctly classifying shelf locations overall. While the KNN model performs reasonably well, especially with a balanced accuracy of 64.58% for the Good shelf category, the multinomial model provides stronger overall accuracy for this task.
+
+
+#### Model comparison
+
+With k=16, the model achieved its highest overall accuracy of 57.5%. By category, the Good shelf location had the strongest balanced accuracy at 64.58%, reflecting a balance between sensitivity (37.5%) and specificity (91.67%). This indicates that although the model’s overall accuracy is only moderate, it is especially effective at classifying the Good category compared to Bad and Medium.

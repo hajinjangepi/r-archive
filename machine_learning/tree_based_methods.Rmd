@@ -1,0 +1,244 @@
+---
+title: "Tree based methods"
+author: "Hajin Jang"
+date: "12/9/2025"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+## Concepts
+
+#### Sketch of the tree
+
+                     X1 < 1
+                    /      \
+                 yes        no
+                /            \
+             X2 < 1           5
+            /     \
+         yes       no
+        /           \
+     X1 < 0          15
+     /    \
+    3    X2 < 0
+         /    \
+       10      0
+
+
+#### Creating diagram
+
+```{r}
+par(xpd = NA)
+plot(NA, NA, type = "n", xlim = c(-2, 2), ylim = c(-3, 3), xlab = "X1", ylab = "X2")
+# X2 < 1
+lines(x = c(-2, 2), y = c(1, 1))
+# X1 < 1 with X2 < 1
+lines(x = c(1, 1), y = c(-3, 1))
+text(x = (-2 + 1)/2, y = -1, labels = c(-1.8))
+text(x = 1.5, y = -1, labels = c(0.63))
+# X2 < 2 with X2 >= 1
+lines(x = c(-2, 2), y = c(2, 2))
+text(x = 0, y = 2.5, labels = c(2.49))
+# X1 < 0 with X2<2 and X2>=1
+lines(x = c(0, 0), y = c(1, 2))
+text(x = -1, y = 1.5, labels = c(-1.06))
+text(x = 1, y = 1.5, labels = c(0.21))
+```
+
+
+## Tree-based methods
+
+#### Training and test sets
+
+```{r}
+library(ISLR2)
+attach(Carseats)
+library(caret)
+
+# Set seed
+set.seed(2345)
+
+trainval <- createDataPartition(y=Carseats$Sales, p=0.75, list=FALSE)
+
+trval <- Carseats[trainval,] # this is a training set (tr+val combined)
+tst <- Carseats[-trainval,] # this is a test set
+
+train <- createDataPartition(y=trval$Sales, p=0.66, list=FALSE)
+tr <- trval[train,]
+val <- trval[-train,]
+
+dim(Carseats)
+dim(trval)
+dim(tst)
+dim(tr)
+dim(val)
+
+summary(trval)
+```
+
+
+#### Regression tree
+
+```{r}
+library(tree)
+
+# Set seed
+set.seed(2345)
+
+# Fit a regression tree to the trval set
+carseats.tree = tree(Sales ~ ., data = trval)
+summary(carseats.tree)
+
+# Plot the tree
+plot(carseats.tree)
+text(carseats.tree, pretty=0, cex=0.5)
+
+# Predict the test set outcomes and MSE
+tree.pred <- predict(carseats.tree, newdata = tst)
+tree.mse  <- mean( (tree.pred - tst$Sales)^2 )
+tree.mse
+```
+
+**Comment:**
+A regression tree was fitted to the training set using all available predictors. The resulting tree selected six variables for splitting: ShelveLoc, Price, Income, Population, Age, Advertising, and CompPrice. Among these, ShelveLoc and Price appeared at the highest levels of the tree, indicating that they explain the largest proportion of variation in Sales. The tree contains 13 terminal nodes and has a residual mean deviance of 2.903, suggesting a moderately complex structure without overfitting the training data excessively.
+
+The top split on ShelveLoc indicates that store display quality is the strongest predictor of Sales. Stores with Good vs. Bad/Medium shelving yield substantially different average sales levels. Subsequent splits show that Price consistently appears as a key determinant of Sales, with lower prices generally associated with higher predicted sales across branches. Other predictors, such as Income, Advertising, Age, Population, and CompPrice, provide finer adjustments to predictions within subgroups, but their effects are smaller compared to ShelveLoc and Price.
+
+When predicting the test set outcomes, the regression tree achieved a test MSE of 4.446654, which reflects the average squared difference between predicted and observed sales in test data. 
+
+
+#### Cross-validation for tree-complexity
+
+```{r}
+# Set seed
+set.seed(2345)
+
+# Cross-validation
+carseats.treecv <- cv.tree(carseats.tree)
+str(carseats.treecv)
+
+# Check the result
+carseats.treecv$dev
+carseats.treecv$size
+
+# View in a plot
+plot(carseats.treecv$size, carseats.treecv$dev, type="b", xlab="Tree Size", ylab="Deviance")
+plot(carseats.treecv$k, carseats.treecv$dev, type="b", main="k = alpha")
+
+# Minimum deviance size
+best.size <- carseats.treecv$size[which.min(carseats.treecv$dev)]
+best.size
+
+# Prune the tree with best.size
+car.prune <- prune.tree(carseats.tree, best = best.size)
+
+plot(car.prune)
+text(car.prune, pretty = 0, cex = 0.5)
+
+# Test MSE of the pruned tree
+prune.pred <- predict(car.prune, newdata = tst)
+prune.mse  <- mean((prune.pred - tst$Sales)^2)
+prune.mse
+
+# Check whether prunning improved the prediction
+tree.mse
+prune.mse
+```
+
+**Comment:**
+The cross-validation results show that deviance decreases rapidly as the tree grows from size 1 to about size 8, after which the improvement becomes minimal. The minimum cross-validated deviance occurs at tree size = 12, which suggests that a relatively large subtree provides the best balance between bias and variance for this dataset.
+Using this optimal size, I pruned the original tree to obtain a 12-terminal-node subtree. When evaluated on the test set, the pruned tree achieved a test MSE of 4.402967, compared with 4.446654 from the unpruned tree. Although the improvement is small, pruning does slightly reduce test error, indicating that the full tree was mildly overfitting the training data.
+
+
+#### Bagging
+
+```{r}
+library(randomForest)
+
+# number of predictors p
+p <- ncol(trval) - 1
+
+# Set seed
+set.seed(2345)
+
+# Bagging
+car.bag <- randomForest(Sales ~ ., data = trval, mtry = p, importance = TRUE)
+car.bag
+
+# Test MSE
+bag.pred <- predict(car.bag, newdata = tst)
+bag.mse  <- mean((bag.pred - tst$Sales)^2)
+bag.mse 
+
+# Important variables
+importance(car.bag)
+varImpPlot(car.bag)
+```
+
+**Comment:**
+I fitted a random forest model with mtry equal to the total number of predictors (p). The model was trained on the trval set using 500 trees. When predicting Sales in the test set, the bagging model achieved a test MSE of approximately 2.022307, which is substantially lower than the MSE obtained from both the full regression tree (4.446654) and the pruned tree (4.402967). This indicates that bagging provides a large improvement in predictive accuracy by reducing variance through averaging many bootstrapped trees.
+
+The variable importance results showed that ShelveLoc and Price were by far the most influential predictors of Sales, followed by CompPrice, Age, Advertising, and Income. These variables contributed the most to reducing prediction error across the ensemble of trees. In contrast, variables such as Education, US, Population, and Urban showed minimal importance, suggesting that they added little predictive value.
+
+
+#### Random forest
+
+```{r}
+# Set seed
+set.seed(2345)
+
+# Default randomForest
+car.rf.default <- randomForest(Sales ~ ., data = trval, importance = TRUE)
+car.rf.default
+
+# Test MSE from the default mtry
+rf.def.pred <- predict(car.rf.default, newdata = tst)
+rf.def.mse  <- mean((rf.def.pred - tst$Sales)^2)
+rf.def.mse
+
+# Compare multiple mtry 
+mtry.grid <- c(2, 4, 6, 8, p)
+rf.mse <- numeric(length(mtry.grid))
+
+for (i in seq_along(mtry.grid)) {
+  set.seed(2345 + i)
+  fit <- randomForest(Sales ~ ., data = trval,
+                      mtry = mtry.grid[i],
+                      importance = TRUE)
+  
+  pred <- predict(fit, newdata = tst)
+  rf.mse[i] <- mean((pred - tst$Sales)^2)
+}
+
+data.frame(mtry = mtry.grid, Test_MSE = rf.mse)
+
+# Best mtry
+best.mtry <- mtry.grid[which.min(rf.mse)]
+best.mtry
+
+# Fit the model with the best mtry
+set.seed(2345)
+car.rf.best <- randomForest(Sales ~ ., data = trval,
+                            mtry = best.mtry,
+                            importance = TRUE)
+importance(car.rf.best)
+varImpPlot(car.rf.best)
+
+# Test MSE of the optimal RF
+rf.best.pred <- predict(car.rf.best, newdata = tst)
+rf.best.mse  <- mean((rf.best.pred - tst$Sales)^2)
+rf.best.mse
+```
+
+**Comment:**
+I fitted a random forest model to the trval set and first evaluated the default setting, which uses mtry = 3 variables at each split. The default model achieved a test MSE of 2.344961 (already improving upon both the single tree and the pruned tree).
+
+To examine how the choice of mtry affects prediction performance, I fitted models with several values of mtry (2, 4, 6, 8, and p). The test MSE decreased as mtry increased, although mtry from 6 to 8 increased the test MSE slightly, from 2.059511 to 2.069844. The lowest MSE value was observed when mtry = 10 (using all predictors). The optimal random forest achieved a test MSE of 2.022307, which is nearly identical to the MSE obtained from bagging. This indicates that, for this dataset, increasing the number of variables considered at each split improves predictive accuracy.
+
+The variable importance results show that ShelveLoc and Price are consistently the most influential predictors of Sales, followed by CompPrice, Age, Advertising, and Income. Variables such as US and Urban contribute very little to the predictive performance, as reflected by their low importance scores.
+
+Overall, random forests substantially outperform single-tree models, and increasing m reduces error in this case. When mtry is set to its maximum (bagging), the model captures more of the strong predictors at each split, which leads to the lowest test MSE.
+
+

@@ -1,0 +1,329 @@
+---
+title: "Selection subset, Ridge/LASSO, PCR and PLS"
+author: "Hajin Jang"
+date: "11/11/2025"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+
+## Best subset selection
+
+```{r, message = FALSE, warning = FALSE}
+library(ISLR2)
+library(glmnet)
+library(leaps)
+library(pls)
+```
+
+
+#### A predictor $X$ of length $n = 100$, noise vector $\epsilon$ of length $n = 100$.
+
+```{r}
+set.seed(1)
+X <- rnorm(100)
+eps <- rnorm(100)
+```
+
+
+#### A response vector $Y$ of length $n = 100$ according to the model $$Y = \beta_0 + \beta_1X + \beta_2X^2 + \beta_3X^3 + \epsilon,$$ where $\beta_0, \beta_1, \beta_2,$ and $\beta_3$
+
+```{r}
+beta0 = 3
+beta1 = 2
+beta2 = -3
+beta3 = 0.3
+Y = beta0 + beta1 * X + beta2 * X^2 + beta3 * X^3 + eps
+```
+
+**Comment:** I used beta0=3, beta1=2, beta2=-3, and beta3=0.3.
+
+
+#### Best model selection containing the predictors $X, X^2, ..., X^{10}$
+
+```{r}
+data.full = data.frame(y = Y, x = X)
+mod.full = regsubsets(y ~ poly(x, 10, raw = T), data = data.full, nvmax = 10)
+mod.summary = summary(mod.full)
+mod.summary
+
+# Model size (cp, BIC, adjr2)
+which.min(mod.summary$cp)
+which.min(mod.summary$bic)
+which.max(mod.summary$adjr2)
+
+# Plot (cp, BIC, adjr2)
+plot(mod.summary$cp, xlab = "Subset Size", ylab = "Cp", pch = 20, type = "l")
+points(3, mod.summary$cp[3], pch = 4, col = "purple", lwd = 7)
+
+plot(mod.summary$bic, xlab = "Subset Size", ylab = "BIC", pch = 20, type = "l")
+points(3, mod.summary$bic[3], pch = 4, col = "purple", lwd = 7)
+
+plot(mod.summary$adjr2, xlab = "Subset Size", ylab = "Adjusted R2", pch = 20, type = "l")
+points(3, mod.summary$adjr2[3], pch = 4, col = "purple", lwd = 7)
+
+coefficients(mod.full, id = 3)
+```
+
+**Comment:** 
+Based on the Cp, BIC, and Adjusted \( R^2 \) criteria, all three methods selected the model with three variables. Each criterion favored \( X^7 \) over \( X^3 \). The estimated coefficients were close to the true \( \beta \) values, with \( \hat{\beta}_0 = 3.076 \), \( \hat{\beta}_1 = 2.356 \), \( \hat{\beta}_2 = -3.165 \), and \( \hat{\beta}_3 = 0.010 \).
+
+
+#### Forwards/backwards stepwise selection 
+
+```{r}
+mod.fwd = regsubsets(y ~ poly(x, 10, raw = T), data = data.full, nvmax = 10, method = "forward")
+mod.bwd = regsubsets(y ~ poly(x, 10, raw = T), data = data.full, nvmax = 10, method = "backward")
+
+fwd.summary = summary(mod.fwd)
+bwd.summary = summary(mod.bwd)
+fwd.summary
+bwd.summary
+
+which.min(fwd.summary$cp)
+which.min(bwd.summary$cp)
+which.min(fwd.summary$bic)
+which.min(bwd.summary$bic)
+which.max(fwd.summary$adjr2)
+which.max(bwd.summary$adjr2)
+
+# Plot 
+par(mfrow = c(3, 2))
+plot(fwd.summary$cp, xlab = "Subset Size", ylab = "Forward Cp", pch = 20, type = "l")
+points(3, fwd.summary$cp[3], pch = 4, col = "purple", lwd = 7)
+plot(bwd.summary$cp, xlab = "Subset Size", ylab = "Backward Cp", pch = 20, type = "l")
+points(3, bwd.summary$cp[3], pch = 4, col = "purple", lwd = 7)
+plot(fwd.summary$bic, xlab = "Subset Size", ylab = "Forward BIC", pch = 20, type = "l")
+points(3, fwd.summary$bic[3], pch = 4, col = "purple", lwd = 7)
+plot(bwd.summary$bic, xlab = "Subset Size", ylab = "Backward BIC", pch = 20, type = "l")
+points(3, bwd.summary$bic[3], pch = 4, col = "purple", lwd = 7)
+plot(fwd.summary$adjr2, xlab = "Subset Size", ylab = "Forward Adjusted R2", pch = 20, type = "l")
+points(3, fwd.summary$adjr2[3], pch = 4, col = "purple", lwd = 7)
+plot(bwd.summary$adjr2, xlab = "Subset Size", ylab = "Backward Adjusted R2", pch = 20, type = "l")
+points(4, bwd.summary$adjr2[4], pch = 4, col = "purple", lwd = 7)
+
+coefficients(mod.fwd, id = 3)
+coefficients(mod.bwd, id = 3)
+coefficients(mod.bwd, id = 4)
+```
+
+**Comment:**  
+From the graph, all selection criteria identified the 3-variable model as optimal, except for the backward stepwise selection based on Adjusted \( R^2 \). Therefore, I fitted the forward stepwise model with 3 variables and the backward stepwise models with 3 and 4 variables. The forward stepwise model selected \( X^7 \) instead of \( X^3 \), while the backward stepwise model with 3 variables selected \( X^9 \), and the one with 4 variables included \( X^8 \) and \( X^9 \).  
+
+Overall, the estimated coefficients were close to the true \( \beta \) values. The forward stepwise model with 3 variables produced estimates most similar to the true coefficients, followed by the backward stepwise models with 3 and 4 variables.
+
+
+#### Lasso & cv
+
+```{r}
+xmat = model.matrix(y ~ poly(x, 10, raw = T), data = data.full)[, -1]
+mod.lasso = cv.glmnet(xmat, Y, alpha = 1)
+best.lambda = mod.lasso$lambda.min
+best.lambda
+
+plot(mod.lasso)
+
+# Fitting the model on entire data using best lambda
+best.model = glmnet(xmat, Y, alpha = 1)
+predict(best.model, s = best.lambda, type = "coefficients")
+```
+
+**Comment:**
+The lasso model was fitted using cross-validation to select the optimal penalty parameter \( \lambda \). The best value obtained was \( \lambda \) = 0.0399. The lasso retained the polynomial terms \( X^1 \), \( X^2 \), \( X^5 \), and \( X^7 \), while all higher-order terms were set to zero. The estimated coefficients were close to the true \( \beta \) values, suggesting that lasso effectively identified the key predictors and removed irrelevant terms.
+
+
+#### Best subset selection and lasso for a response vector $Y$ according to the model $$Y = \beta_0 + \beta_7X^7 + \epsilon,$$ 
+
+```{r}
+beta7 = 7
+Y = beta0 + beta7 * X^7 + eps
+# Predict using regsubsets
+data.full = data.frame(y = Y, x = X)
+mod.full = regsubsets(y ~ poly(x, 10, raw = T), data = data.full, nvmax = 10)
+mod.summary = summary(mod.full)
+mod.summary
+
+# Model size for best cp, BIC and adjr2
+which.min(mod.summary$cp)
+which.min(mod.summary$bic)
+which.max(mod.summary$adjr2)
+
+coefficients(mod.full, id = 1)
+coefficients(mod.full, id = 2)
+coefficients(mod.full, id = 4)
+
+xmat = model.matrix(y ~ poly(x, 10, raw = T), data = data.full)[, -1]
+mod.lasso = cv.glmnet(xmat, Y, alpha = 1)
+best.lambda = mod.lasso$lambda.min
+best.lambda
+
+best.model = glmnet(xmat, Y, alpha = 1)
+predict(best.model, s = best.lambda, type = "coefficients")
+```
+
+**Comment:**  
+When the true model was generated as \( Y = 3 + 7X^7 + \epsilon \), both best subset selection and lasso regression successfully identified \( X^7 \) as the key predictor.  
+
+In the best subset selection:
+The BIC criterion selected a 1-variable model containing only \( X^7 \), which matches the true underlying model.  
+The Cp and adjusted \( R^2 \) criteria selected slightly larger models (2- and 4-variable models, respectively), but in all cases \( X^7 \) remained the dominant term with an estimated coefficient around 7, very close to the true value.
+
+For the lasso model, the optimal tuning parameter (\( \lambda = 12.37 \)) showed the result where only \( X^7 \) was retained (coefficient=6.797), and all other coefficients were shrunk to zero.  
+
+Overall, both methods accurately recovered the true underlying relationship. The lasso provided an especially clear solution by automatically performing variable selection and shrinkage, confirming its advantage in identifying the most relevant predictor when the true model is sparse.
+
+
+
+## Prediction
+
+#### Training and test sets
+
+```{r}
+set.seed(1)
+sum(is.na(College))
+
+train.size = dim(College)[1] / 2
+train = sample(1:dim(College)[1], train.size)
+test = -train
+College.train = College[train, ]
+College.test = College[test, ]
+```
+
+
+#### Least squares linear model
+
+```{r}
+lm.fit = lm(Apps~., data=College.train)
+lm.pred = predict(lm.fit, College.test)
+mean((College.test[, "Apps"] - lm.pred)^2)
+```
+
+**Comment:**  
+The mean squared error (MSE) on the test set was 1135758, indicating the average squared difference between the predicted and actual number of applications in the test data.
+
+
+#### Ridge regression model ($\lambda$ chosen by cross-validation)
+
+```{r}
+train.mat = model.matrix(Apps~., data=College.train)
+test.mat = model.matrix(Apps~., data=College.test)
+grid = 10 ^ seq(4, -2, length=100)
+
+mod.ridge = cv.glmnet(train.mat, College.train[, "Apps"], alpha=0, lambda=grid, thresh=1e-12)
+lambda.best = mod.ridge$lambda.min
+lambda.best
+
+ridge.pred = predict(mod.ridge, newx=test.mat, s=lambda.best)
+mean((College.test[, "Apps"] - ridge.pred)^2)
+```
+
+**Comment:**  
+The best value of \( \lambda \) was 0.01. The mean squared error (MSE) on the test set was 1135714, which is very similar to the test error obtained from the linear regression model, indicating that ridge regularization provided little improvement in this case.
+
+
+#### Lasso model ($\lambda$ chosen by cross-validation)
+
+```{r}
+mod.lasso = cv.glmnet(train.mat, College.train[, "Apps"], alpha=1, lambda=grid, thresh=1e-12)
+lambda.best = mod.lasso$lambda.min
+lambda.best
+
+lasso.pred = predict(mod.lasso, newx=test.mat, s=lambda.best)
+mean((College.test[, "Apps"] - lasso.pred)^2)
+```
+
+**Comment:**  
+The best value of \( \lambda \) was 0.01, and the mean squared error (MSE) on the test set was 1135660. This result is very close to the test MSEs from both the linear regression (1135758) and ridge regression (1135714) models, suggesting that lasso regularization did not substantially improve prediction accuracy in this dataset.
+The similarity in test errors across models implies that the predictors in the College dataset are moderately correlated, and the model complexity is already well captured by the linear regression without severe overfitting. The regularization penalty in the lasso model mainly served to slightly shrink coefficient magnitudes rather than exclude predictors entirely.
+
+The lasso model retained all 18 predictors (none were shrunk exactly to zero), indicating that even with regularization, all predictors contributed to the model.  
+
+The estimated coefficients at \( \lambda = 0.01 \) were:  
+
+```{r}
+mod.lasso = glmnet(model.matrix(Apps~., data=College), College[, "Apps"], alpha=1)
+predict(mod.lasso, s=lambda.best, type="coefficients")
+```
+
+**Comment:**  
+The similar MSEs across OLS, ridge, and lasso indicate that the models generalize comparably well to the test data.
+
+The lasso regression performs on par with ridge and OLS models in terms of prediction error, while offering slightly better regularization and interpretability through coefficient shrinkage. However, because no variables were excluded, the lasso’s advantage in model simplification was limited in this case.
+
+
+#### PCR model ($M$ chosen by cross-validation)
+
+```{r}
+pcr.fit = pcr(Apps~., data=College.train, scale=T, validation="CV")
+validationplot(pcr.fit, val.type="MSEP")
+
+pcr.pred = predict(pcr.fit, College.test, ncomp=9)
+mean((College.test[, "Apps"] - as.numeric(pcr.pred))^2)
+```
+
+**Comment:**
+A principal components regression (PCR) model was fitted on the training data using 10-fold cross-validation to determine the optimal number of components \( M \). From the cross-validation plot of mean squared error of prediction (MSEP), the test error decreases sharply up to around 5 components and then stabilizes, suggesting that using approximately 9 components provides near-optimal performance without overfitting.
+
+Using \( M = 9 \) components, the test mean squared error (MSE) was 1583520. This MSE remains higher than those from the linear (1135758), ridge (1135714), and lasso (1135660) models, indicating that PCR performs less effectively in this case.
+
+
+#### PLS model ($M$ chosen by cross-validation)
+
+```{r}
+pls.fit = plsr(Apps~., data=College.train, scale=T, validation="CV")
+validationplot(pls.fit, val.type="MSEP")
+
+pls.pred = predict(pls.fit, College.test, ncomp=6)
+mean((College.test[, "Apps"] - as.numeric(pls.pred))^2)
+```
+
+**Comment:**  
+A partial least squares (PLS) regression model was fitted on the training data with cross-validation to select the optimal number of components \( M \). From the cross-validation plot of MSEP, the test error decreases sharply within the first few components and levels off around 5–7 components, indicating that using approximately 6 components provides an optimal balance between bias and variance.
+
+Using \( M = 6 \) components, the test mean squared error (MSE) was 1066991, which is slightly lower than those from the linear (1135758), ridge (1135714), and lasso (1135660) models, and considerably lower than the PCR model (1583520). The PLS model outperformed the other methods in predictive accuracy, achieving the lowest test MSE.  
+
+In conclusion, the PLS model with 6 components achieved the best test performance among all models evaluated. This demonstrates that incorporating the response into component construction enables PLS to more effectively balance dimensionality reduction and predictive accuracy.
+
+
+#### Interpretation
+
+```{r}
+test.avg = mean(College.test[, "Apps"])
+
+# Linear regression
+lm.test.r2 = 1 - mean((College.test[, "Apps"] - lm.pred)^2) / 
+  mean((College.test[, "Apps"] - test.avg)^2)
+
+# Ridge regression
+ridge.test.r2 = 1 - mean((College.test[, "Apps"] - ridge.pred)^2) / 
+  mean((College.test[, "Apps"] - test.avg)^2)
+
+# Lasso regression
+lasso.test.r2 = 1 - mean((College.test[, "Apps"] - lasso.pred)^2) / 
+  mean((College.test[, "Apps"] - test.avg)^2)
+
+# PCR (ncomp = 9)
+pcr.test.r2 = 1 - mean((College.test[, "Apps"] - as.numeric(pcr.pred))^2) / 
+  mean((College.test[, "Apps"] - test.avg)^2)
+
+# PLS (ncomp = 6)
+pls.test.r2 = 1 - mean((College.test[, "Apps"] - as.numeric(pls.pred))^2) / 
+  mean((College.test[, "Apps"] - test.avg)^2)
+
+# Compare model performance
+barplot(c(lm.test.r2, ridge.test.r2, lasso.test.r2, pcr.test.r2, pls.test.r2),
+        names.arg = c("OLS", "Ridge", "Lasso", "PCR", "PLS"),
+        col = "purple", main = "Test R-squared",
+        ylab = "R² (Test Set)", ylim = c(0, 1))
+```
+
+**Comment:**  
+All five models—ordinary least squares (OLS), ridge regression, lasso regression, principal components regression (PCR), and partial least squares (PLS)—demonstrated very similar performance on the test set. The test \( R^2 \) values were all high (approximately 0.90–0.93), indicating that each model explains over 90% of the variance in the number of college applications received.
+
+Among the methods, **PLS** achieved the highest test \( R^2 \), followed closely by **ridge**, **lasso**, and **OLS**, while **PCR** had a slightly lower \( R^2 \). These differences, however, are minimal, suggesting that the choice of regularization or dimensionality reduction technique has little impact on predictive accuracy for this dataset.
+
+**Conclusion:** All five methods yield strong predictive performance, with **PLS** providing the best generalization and **PCR** performing slightly worse. The results suggest that simple linear regression already performs well for this dataset, and more complex methods offer only marginal improvement.
+
+

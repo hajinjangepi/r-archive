@@ -1,0 +1,425 @@
+---
+title: "KNN Regression, KNN Classification, LDA, QDA, Naive Bayes"
+author: "Hajin Jang"
+date: "10/8/2025"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+
+## Concept
+
+#### If the Bayes decision boundary is linear, do we expect LDA or QDA to perform better on the training set? On the test set?
+
+On the training data, QDA is generally expected to perform better because its greater flexibility allows it to model more complex boundaries. Even if the true decision boundary is linear, QDA can still capture subtle patterns specific to the training set, which typically lowers training error.
+On the test data, LDA is expected to perform better. Since it assumes a linear boundary, LDA better matches the underlying data structure. Its lower flexibility helps prevent overfitting and supports stronger generalization, whereas QDA’s greater flexibility can lead to overfitting, increased variance, and weaker test performance.
+
+#### If the Bayes decision boundary is non-linear, do we expect LDA or QDA to perform better on the training set? On the test set?
+
+QDA is expected to outperform on both the training and test sets. Its greater flexibility enables it to capture non-linear relationships more accurately. Because the true decision boundary is non-linear, QDA provides a closer fit, making it better suited for both training and test data.
+
+#### In general, as the sample size n increases, do we expect the test prediction accuracy of QDA relative to LDA to improve, decline, or be unchanged? Why?
+
+To improve. Compared to LDA, QDA is more flexible but requires estimating more parameters, which can cause overfitting and weaker generalization when the sample size is small. As the sample size grows, QDA can estimate these parameters more reliably, which enhances test accuracy and reduces overfitting. LDA, on the other hand, relies on a simpler linear boundary, so its performance is steadier but gains less from larger sample sizes.
+
+#### Even if the Bayes decision boundary for a given problem is linear, we will probably achieve a superior test error rate using QDA rather than LDA because QDA is flexible enough to model a linear decision boundary. Justify your answer.
+
+False. While QDA can represent a linear decision boundary, it is more complex and involves estimating a larger number of parameters. When the true boundary is linear, LDA is better suited because it assumes a shared covariance structure across classes, making the model simpler and less prone to overfitting. In contrast, QDA’s extra flexibility can lead to overfitting the training data.
+
+
+## Part 1: KNN Regression
+
+```{r}
+library(ISLR2)
+library(FNN)
+library(caret)
+library(tidyverse)
+head(Carseats)
+```
+
+
+#### Training and testing sets (70/30)
+
+```{r}
+set.seed(0911)
+train <- sample(1:nrow(Carseats), size=ceiling(nrow(Carseats)*.7))
+```
+
+```{r}
+str(train)
+length(train)
+train[1:10]
+length(train)/nrow(Carseats)
+```
+
+
+#### Preprocessing
+
+##### One-hot coding
+
+```{r}
+Carseats.xmat <- model.matrix(Sales~., data=Carseats[,-c(2:5, 7:9)])
+str(Carseats.xmat)
+```
+
+```{r}
+Carseats.xmat[1:10,]
+```
+
+```{r}
+Carseats.xmat <- Carseats.xmat[,-1]
+```
+
+##### Standardization
+
+```{r}
+Carseats.xmat[1:10,] 
+Carseats.XConTr <- Carseats.xmat[train, 1, drop = FALSE]
+Carseats.XCatTr <- Carseats.xmat[train,2:3]
+```
+
+```{r}
+preProcVals<- preProcess(Carseats.XConTr, method=c("center", "scale")) 
+str(preProcVals)
+```
+
+```{r}
+Carseats.XConTrZ <- predict(preProcVals, Carseats.XConTr)
+Carseats.XTrZ <- cbind(Carseats.XConTrZ, Carseats.XCatTr)
+```
+
+```{r}
+dim(Carseats.XTrZ)
+Carseats.XTrZ[1:5,]
+summary(Carseats.XTrZ)
+```
+
+##### Validation set
+
+```{r}
+Carseats.XConVal <- Carseats.xmat[-train,1,drop = FALSE]
+Carseats.XCatVal <- Carseats.xmat[-train,2:3]
+Carseats.XConValZ <- predict(preProcVals, Carseats.XConVal)
+Carseats.XValZ <- cbind(Carseats.XConValZ, Carseats.XCatVal)
+dim(Carseats.XValZ)
+```
+
+```{r}
+Carseats.XValZ[1:5,]
+summary(Carseats.XValZ)
+```
+
+
+#### Fitting KNN regression
+
+```{r}
+set.seed(123) 
+
+mKnnReg <- function(trainDat, validDat, trainOut, validOut, k){
+ mseKNN <- rep(NA, times=length(k))
+ for (i in 1:length(k)) {
+ out <- FNN::knn.reg(train=trainDat, test=validDat, y=trainOut, k=k[i])
+ mseKNN[i] <- mean((out$pred-validOut)^2) 
+ }
+ return(mseKNN)
+}
+
+
+Kvec <- 1:30
+
+mseKNN <- mKnnReg(trainDat=Carseats.XTrZ, validDat=Carseats.XValZ, trainOut=Carseats$Sales[train], validOut=Carseats$Sales[-train], k=Kvec)
+
+mseKNN
+```
+
+
+#### Plotting 1/K (x-axis) versus MSE (y-axis)
+
+```{r}
+plot(1/Kvec, mseKNN, type="l", xlab="1/K", ylab="MSE")
+```
+
+```{r}
+kopt <- which.min(mseKNN)
+kopt
+
+bestMSE <- mseKNN[kopt]
+bestMSE
+
+bestK <- Kvec[kopt]
+bestK
+```
+
+```{r}
+knnpred <- FNN::knn.reg(train=Carseats.XTrZ, test=Carseats.XValZ, y=Carseats$Sales[train], k=kopt)
+```
+
+**Comment:** The optimal K value is 26, as it yields the lowest validation MSE among all tested values, indicating the best predictive performance of the model.
+
+
+#### Interpretation
+
+##### Price
+
+```{r}
+plotdat <- data.frame(Price=Carseats$Price[-train], Urban=Carseats$Urban[-train], US=Carseats$US[-train], Sales=knnpred$pred)
+
+plotdat <- plotdat[order(plotdat$Price),]
+plot(x=plotdat$Price, y=plotdat$Sales, type="l", xlab="Price", ylab="Predicted Sales")
+```
+
+As the price increases, the predicted sales go down. Once the price exceeds 100, the variability in predicted sales increases, showing noticeable spikes and drops. This implies that other factors besides price may be influencing sales predictions.
+
+##### Urban
+
+```{r}
+plotdat <- plotdat[order(plotdat$Urban),]
+boxplot(plotdat$Sales~plotdat$Urban, ylab="Predicted Sales", xlab="Urban")
+```
+
+The non-urban group has a higher median predicted sales than the urban group and a wider interquartile range, indicating greater variability in sales predictions for non-urban areas. In contrast, the urban group shows a narrower IQR, suggesting less variability, but includes several high-value outliers. Overall, predicted sales in non-urban areas are generally higher and more dispersed, while urban areas tend to have lower, more tightly clustered sales with a few extreme values.
+
+##### US
+
+```{r}
+plotdat <- plotdat[order(plotdat$US),]
+boxplot(plotdat$Sales~plotdat$US, ylab="Predicted Sales", xlab="US")
+```
+
+The US group has a higher median predicted sales compared to the non-US group and has a broader interquartile range, indicating greater variability within its predictions. The non-US group, while generally showing lower predicted sales, has several high-value outliers. This suggests that although most predictions for the non-US group are lower, a few cases stand out with unusually high sales. Overall, the US group shows a wider spread in predicted sales, indicating more variation across its data points.
+
+
+## Part 2 
+
+#### mpg01 variable
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(MASS)
+library(ISLR2)
+library(caret)
+library(e1071)
+library(class) 
+data("Auto")
+str(Auto)
+
+# median of mpg
+mpg_median <- median(Auto$mpg)
+
+# create mpg01
+Auto <- Auto %>%
+  mutate(mpg01 = ifelse(mpg > mpg_median, 1, 0),
+         mpg01 = as.factor(mpg01),
+         origin = as.factor(origin))
+
+#Auto <- cbind(Auto, data.frame("mpg01" = ifelse(Auto$mpg > mpg_median, 1, 0)))
+
+str(Auto)
+table(Auto$mpg01)
+```
+
+#### EDA
+
+##### 1) Cylinders
+
+```{r}
+library(ggplot2)
+ggplot(Auto, aes(x = mpg01, y = cylinders)) +
+  geom_boxplot() +
+  labs(title = "cylinders vs mpg01", x = "mpg01 (0 = Low mpg, 1 = High mpg)", y = "cylinders")
+```
+
+Cars with low mpg (mpg01 = 0) tend to have a significantly higher median number of cylinders than those with high mpg (mpg01 = 1). The interquartile range is also wider for the low-mpg group, indicating more variability in cylinder counts among less fuel-efficient cars. The boxplot shows a negative relationship between cylinder count and gas mileage. Vehicles with more cylinders generally have lower mpg. This clear distinction between the two groups suggests that the number of cylinders could be a useful predictor for mpg01.
+
+##### 2) Displacement
+
+```{r}
+ggplot(Auto, aes(x = mpg01, y = displacement)) +
+  geom_boxplot() +
+  labs(title = "Displacement vs mpg01", x = "mpg01 (0 = Low mpg, 1 = High mpg)", y = "Displacement")
+```
+
+Cars with low mpg (mpg01 = 0) show a much higher median engine displacement than those with high mpg (mpg01 = 1). They also have a wider interquartile range, indicating more variation in displacement among less fuel-efficient vehicles. The boxplot suggests a negative correlation between engine displacement and mpg, with larger displacements linked to lower fuel efficiency. Given the clear visual separation between the two groups, displacement appears to be a useful predictor of mpg01.
+
+##### 3) Horsepower
+
+```{r}
+ggplot(Auto, aes(x = mpg01, y = horsepower)) +
+  geom_boxplot() +
+  labs(title = "horsepower vs mpg01", x = "mpg01 (0 = Low mpg, 1 = High mpg)", y = "horsepower")
+```
+
+Cars with low mpg (mpg01 = 0) tend to have a much higher median horsepower than those with high mpg (mpg01 = 1). The interquartile range is wider for the low-mpg group, indicating greater variability in horsepower among less fuel-efficient cars. The boxplot indicates a negative relationship between horsepower and mpg, with higher horsepower linked to lower fuel efficiency. The clear visual distinction between the two groups suggests that horsepower could be a useful predictor of mpg01.
+
+##### 4) Weight
+
+```{r}
+ggplot(Auto, aes(x = mpg01, y = weight)) +
+  geom_boxplot() +
+  labs(title = "weight vs mpg01", x = "mpg01 (0 = Low mpg, 1 = High mpg)", y = "weight")
+```
+
+Cars with low mpg (mpg01 = 0) have a significantly higher median vehicle weight than those with high mpg (mpg01 = 1). They also show a wider interquartile range, suggesting more variation in weight among less fuel-efficient vehicles. The boxplot shows a negative correlation between vehicle weight and mpg, indicating that heavier cars tend to have lower fuel efficiency. Given the clear visual difference between the groups, vehicle weight appears to be a useful predictor of mpg01.
+
+##### 5) Acceleration
+
+```{r}
+ggplot(Auto, aes(x = mpg01, y = acceleration)) +
+  geom_boxplot() +
+  labs(title = "acceleration vs mpg01", x = "mpg01 (0 = Low mpg, 1 = High mpg)", y = "acceleration")
+```
+
+Cars with low mpg tend to have lower acceleration times compared to those with high mpg. The boxplot suggests a slight positive relationship between acceleration and fuel efficiency, but the difference between the two groups is not very pronounced. Since the distinction isn’t clear, I would not consider acceleration a strong predictor of mpg01.
+
+##### 6) Year
+
+```{r}
+ggplot(Auto, aes(x = mpg01, y = year)) +
+  geom_boxplot() +
+  labs(title = "year vs mpg01", x = "mpg01 (0 = Low mpg, 1 = High mpg)", y = "year")
+```
+
+Cars produced in more recent years generally have higher MPG than those from the early 1970s. However, the correlation doesn’t appear to be strong, as there is noticeable overlap between the two groups. Since the difference isn't clearly defined, I would not consider the year of production a strong predictor of mpg01.
+
+##### 7) Origin
+
+```{r}
+library(ggplot2)
+ggplot(Auto, aes(x = mpg01, fill = origin)) +
+  geom_bar(position = "fill") +  # Stacked bars with proportions
+  labs(title = "origin vs. mpg01", 
+       x = "mpg01", 
+       y = "Proportion", 
+       fill = "origin")
+```
+
+The first origin has a higher proportion of low mpg cars, while the other two origins are similar to each other and have a high proportion of high mpg cars. Given the limited distinction, I would not consider origin a useful predictor.
+
+**In conclusion:** Based on the plots above, **cylinders, displacement, horsepower, and weight** appear to be the most promising variables for predicting mpg01.
+
+
+#### Training and testing datasets
+
+```{r}
+set.seed(123)
+train <-createDataPartition(Auto$mpg01, p=0.7, list=FALSE)
+Auto.tr <- Auto[train, ]
+Auto.te <- Auto[-train, ]
+nrow(Auto.tr)
+nrow(Auto.te)
+```
+
+
+#### LDA 
+
+```{r}
+ConfusionMatrix <- function(pred, truth){
+  conf_table <- table(pred, truth)
+  print(conf_table)
+  acc <- sum(diag(conf_table)) / sum(conf_table)
+  cat("Overall Accuracy:", round(acc, 4), "\n")
+  return(conf_table)
+}
+
+set.seed(123)
+
+lda_fit <- lda(mpg01 ~ cylinders + displacement + horsepower + weight,
+               data = Auto.tr)
+lda_pred <- predict(lda_fit, Auto.te)
+
+lda_conf <- ConfusionMatrix(lda_pred$class, Auto.te$mpg01)
+lda_error <- (lda_conf[1,2] + lda_conf[2,1]) / sum(lda_conf)
+lda_error
+```
+
+**Comment:** The test error of the LDA model obtained is 13.8%.
+
+
+#### Logistic regression
+
+```{r}
+set.seed(123)
+
+logit_fit <- glm(mpg01 ~ cylinders + displacement + horsepower + weight,
+                 family = binomial(link = "logit"), data = Auto.tr)
+logit_prob <- predict(logit_fit, Auto.te, type = "response")
+logit_pred <- as.factor(ifelse(logit_prob > 0.5, "Yes", "No"))
+
+logit_conf <- ConfusionMatrix(logit_pred, Auto.te$mpg01)
+logit_error <- (logit_conf[1,2] + logit_conf[2,1]) / sum(logit_conf)
+logit_error
+```
+
+**Comment:** The test error of the logistic regression model obtained is 15.5%.
+
+
+#### KNN
+
+```{r}
+knn_trainX = Auto.tr %>% dplyr::select(cylinders, displacement, horsepower, weight)
+knn_testX = Auto.te%>% dplyr::select(cylinders, displacement, horsepower, weight)
+
+mKnnClass <- function(trainDat, validDat, trainOut, validOut, k){
+  confKNN <- list(NA, times=length(k))
+  accKNN <- rep(NA, times=length(k))
+  for (i in 1:length(k)) {
+     out <- knn(train=trainDat, test=validDat, cl=trainOut, k=k[i])
+     confKNN[[i]] <- confusionMatrix(out, validOut) 
+     accKNN[i] <- confKNN[[i]]$overall[1]
+ }
+ return(list(conf=confKNN, accuracy=accKNN))
+}
+
+# set your vector for K
+Kvec <- 1:30
+
+confKNN <- mKnnClass(trainDat=knn_trainX, validDat=knn_testX, trainOut=Auto.tr$mpg01, validOut=Auto.te$mpg01, k=Kvec)
+confKNN[[2]]
+
+plot(Kvec, confKNN[[2]], type="l", xlab="K", ylab="Accuracy", xlim=c(min(Kvec), max(Kvec)))
+
+kopt <- which.max(confKNN[[2]])
+kopt
+
+confKNN_best <- mKnnClass(trainDat=knn_trainX, validDat=knn_testX, trainOut=Auto.tr$mpg01, validOut=Auto.te$mpg01, k=kopt)
+KNN_error <- 1-confKNN_best[[2]]
+KNN_error
+```
+
+**Comment:** The model achieved the highest classification accuracy at K = 6 (Accuracy = 0.853), as shown in the accuracy–K curve. This K value was selected as optimal because it maximized validation accuracy and minimized the test error rate (1 – Accuracy = 14.7%). For smaller K values, the model showed high variance and overfitting, while for larger K values, accuracy declined due to underfitting.
+
+
+#### Scalining and centering
+
+```{r}
+# scale training set
+preProcVals<- preProcess(knn_trainX, method=c("center", "scale")) 
+knn_trainz <- predict(preProcVals, knn_trainX)
+str(knn_trainz)
+
+# scale testing set
+knn_testz <- predict(preProcVals, knn_testX)
+str(knn_testz)
+
+confKNN_z <- mKnnClass(trainDat=knn_trainz, validDat=knn_testz, trainOut=Auto.tr$mpg01, validOut=Auto.te$mpg01, k=Kvec)
+confKNN_z
+
+plot(Kvec, confKNN_z[[2]], type="l", xlab="K", ylab="Accuracy", xlim=c(min(Kvec), max(Kvec)))
+
+kopt_z <- which.max(confKNN_z[[2]])
+kopt_z
+
+confKNN_best_z <- mKnnClass(trainDat=knn_trainz, validDat=knn_testz, trainOut=Auto.tr$mpg01, validOut=Auto.te$mpg01, k=kopt_z)
+knn_error_z <- 1-confKNN_best_z[[2]]
+knn_error_z
+```
+
+According to the accuracy output and plot, the optimal K value for the scaled model is 3. With this setting, the test error for the KNN model decreases to 13.8%.
+
+**Conclusion:** Scaling the features significantly affected the choice of k, reducing it from 6 to 3. It also improved the model’s performance, lowering the test error from 14.7% before scaling to 13.8% after scaling. This indicates that feature scaling has a notably positive impact on KNN performance.
+
+**Explanation:** KNN relies on distance calculations to classify data points, so when features have different units or ranges, those with larger scales may dominate the distance measure, regardless of their true importance. By standardizing continuous variables (mean of 0 and standard deviation of 1), all features are placed on a similar scale. This ensures a more balanced contribution to distance calculations, resulting in better classification accuracy.
+

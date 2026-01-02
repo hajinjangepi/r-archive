@@ -1,0 +1,325 @@
+---
+title: "Flexibility, Regression, Simulated Data"
+author: "Hajin Jang"
+date: "9/23/2025"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+# Concepts
+
+#### a. The sample size n is extremely large, and the number of predictors p is small.
+
+*Flexible method \> Inflexible method*
+
+Flexible methods can leverage large datasets to model complex relationships between predictors and outcomes without overfitting. With sufficient sample size, the risk of overfitting, often associated with highly flexible model, is minimized. Moreover, these methods are better equipped to detect subtle or intricate patterns in the data that less flexible approaches may overlook.
+
+
+#### b. The number of predictors p is extremely large, and the number of observations n is small.
+
+*Inflexible method \> Flexible method*
+
+Here, flexible methods are at greater risk of overfitting. In contrast, inflexible methods, which enforce stronger structure and rely on fewer assumptions about the data, are less likely to overfit and can yield more dependable predictions when the dataset is small compared to the number of predictors.
+
+
+#### c. The relationship between the predictors and response is highly non-linear.
+
+*Flexible method \> Inflexible method*
+
+Flexible methods are designed to model complex, non-linear connections between predictors and the outcome. In contrast, inflexible approaches like linear regression rely on predetermined functional forms and may fail to represent the data accurately when the underlying relationships are strongly non-linear.
+
+
+#### d. The variance of the error terms, i.e. σ2 = Var(ϵ), is extremely high.
+
+*Inflexible method \> Flexible method*
+
+In this scenario, the data is highly noisy. Flexible methods often overfit by attempting to capture this noise, which harms their ability to generalize. In contrast, inflexible methods, by enforcing stronger structure and being less reactive to random variation, typically perform better, as they are less prone to fitting the noise.
+
+
+
+# Standard regression model
+
+```{r}
+library(ISLR2)
+head(Carseats)
+```
+
+#### Fitting a multiple regression model
+
+```{r}
+lm.fit <- lm(Sales ~ Price + Urban + US, data=Carseats)
+summary(lm.fit)
+```
+
+
+#### Interpretation
+
+1. Intercept: For a product sold outside the US and in a non-urban setting, the expected sales are 13.04 thousand dollars when the price is zero.
+
+2. Price: For every increase of \$1 in the price of the carseat, the sales are expected to decrease by \$0.0545K, or \$54.50, holding the Urban and US variables constant. This effect is statistically significant (p-value<2e-16).
+
+3. Urban: The expected sales in an urban setting are \$21.92 lower than in a non-urban setting, holding the price and US status constant. This effect is not statistically significant (p-value = 0.94), so we cannot conclude that the urban setting has a meaningful impact on sales.
+
+4. US: The sales in the US are expected to be \$1.2K (or \$1,200) higher than in non-US regions, holding the price and urban status constant. This effect is statistically significant (p-value=4.86e-06).
+
+
+#### Model equation
+
+$$
+Sales = 13.04 - 0.054*Price - 0.022*(Urban Yes=1) + 1.2*(US Yes=1)+𝝐
+$$
+
+
+#### Hypothesis testing
+
+Price and US, since their p-values are below 0.05, allowing us to reject the null hypothesis for these predictors.
+
+
+#### Smaller model
+
+```{r}
+lm.fit2 <- lm(Sales ~ Price + US, data=Carseats)
+summary(lm.fit2)
+```
+
+
+#### Model comparison
+
+**Comment:** Both models explain about 24% of the variance in Sales, leaving roughly 76% unexplained, which indicates a relatively modest overall explanatory power. Model (e) performs slightly better than model (a), as shown by its higher Adjusted R-squared (0.2354 vs. 0.2335) and lower RSE (2.469 vs. 2.472). The adjusted R-squared values are 0.2335 for the linear model and 0.2354 for the polynomial model. Although the polynomial model shows a slightly higher value, the difference is minimal. The ANOVA F-test yields a p-value greater than 0.05, indicating no significant improvement in fit. Therefore, the simpler linear model (fit2) is preferable due to its parsimony.
+
+```{r}
+anova(lm.fit2, lm.fit)
+```
+
+**Comment:** The ANOVA test indicates that the simpler Model (e) is adequate.
+
+
+#### 95% CI
+
+```{r}
+coef(lm.fit2)
+confint(lm.fit2)
+```
+
+**Comment:**
+Intercept: (11.79, 14.27)
+Price: (-0.06, -0.04)
+US Yes: (0.69, 1.71)
+
+
+#### Outliers or high leverage observations
+
+```{r}
+plot(lm.fit2)
+```
+
+```{r}
+cook_dist <- cooks.distance(lm.fit2)
+plot(cook_dist, type="h", main="Cook's Distance", ylab="Cook's Distance")
+abline(h = 0.5, col="red")
+```
+
+```{r}
+hat_values <- hatvalues(lm.fit2)
+plot(hat_values, type="h", main="Leverage Values", ylab="Leverage")
+abline(h = 2 * (length(coef(lm.fit2)) / nrow(Carseats)), col="red")
+```
+
+```{r}
+library(car)
+influencePlot(lm.fit2, id.method="identify", main="Influence Plot", sub="Circle size is proportional to Cook's Distance")
+```
+
+**Comment:** Observations 26 and 368 appear in both the Residuals vs. Leverage plot and the Influence plot, suggesting they may exert both high leverage and strong influence on the model. Likewise, observation 377 shows up in both the QQ plot and the Influence plot, indicating it could also be an outlier.
+
+
+
+# Creating and using simulated data
+
+#### Vector x
+
+```{r}
+set.seed(1)
+x <- rnorm(100, mean=0, sd=1)
+head(x)
+```
+
+#### Vector eps
+
+```{r}
+set.seed(2)
+eps <- rnorm(100, mean=0, sd=sqrt(0.25))
+head(eps)
+```
+
+#### Vector Y = −1+0.5X + ϵ
+
+```{r}
+y <- -1 + 0.5*x + eps
+length(y)
+head(y)
+```
+
+**Comment:** 
+The vector y has a length of 100.
+β0 is the intercept with a value of -1. β1 is the coefficient for x and has a value of 0.5.
+
+
+#### Scatter plot
+
+```{r}
+plot(x, y, main = "Scatterplot of x vs y", xlab = "x", ylab = "y")
+abline(lm(y ~ x), col = "red", lwd = 1)
+```
+
+**Comment:** The scatterplot indicates a positive linear relationship between x and y. The variability around the line comes from the random error term ϵ, which has a variance of 0.25.
+
+
+#### Least squares linear model to predict y using x
+
+```{r}
+model <- lm(y ~ x)
+summary(model)
+```
+
+**Comment:**
+The fitted model is $$y=-1.00454+0.40072x$$
+
+β0 is -1, β\^0 is -1.00454.
+β1 is 0.5, β\^1 is 0.40072.
+
+The estimated intercept βˆ0 is very close to the true value β0=−1, while βˆ1=0.40072 differs somewhat from the true value β1=0.5, which is reasonable given the noise introduced by ϵ. Overall, the model provides a good fit, accounting for 27.6% of the variation in y.
+
+
+#### Display the plots
+
+```{r}
+plot(x, y, main = "Scatterplot with Least Squares and Population Regression Lines",      xlab = "x", ylab = "y", pch = 19, col = "blue")
+abline(lm(y ~ x), col = "red", lwd = 2)
+abline(a = -1, b = 0.5, col = "green", lwd = 2, lty = 2)
+legend("topleft", legend = c("Least Squares Line", "Population Regression Line"),
+       col = c("red", "green"), lty = c(1, 2), lwd = 2)
+```
+
+
+#### Polynomial regression model 
+
+```{r}
+model2 <- lm(y ~ x + I(x^2))
+summary(model2)
+```
+
+The p-value for x\^2 is below 0.05, indicating that the quadratic term makes a significant contribution to the model. The Adjusted R-squared has increased to 29.74%, showing improvement over the previous model.
+
+```{r}
+anova(model, model2)
+```
+
+The results suggest that including the quadratic term enhances the model, and a quadratic regression may provide a better fit.
+
+
+#### Reducing noise
+
+```{r}
+set.seed(1)
+x2 <- rnorm(100, mean = 0, sd = 1)
+```
+
+```{r}
+set.seed(2)
+eps2 <- rnorm(100, mean = 0, sd = sqrt(0.01))
+```
+
+```{r}
+y2 <- -1 + 0.5 * x2 + eps2
+```
+
+```{r}
+plot(x2, y2, main = "Scatterplot of x vs y (Less Noise)", xlab = "x", ylab = "y", pch = 19, col = "blue")
+abline(lm(y2 ~ x2), col = "red", lwd = 2)
+```
+
+The scatterplot shows that the points are now clustered more closely around the regression line than before, indicating less noise in the data.
+
+```{r}
+model2 <- lm(y2 ~ x2)
+summary(model2)
+```
+
+The estimated coefficients β\^0=-1.00091 and β\^1=0.48014 are closer to the true values (β0=-1 and β1=0.5) than in the first model, due to reduced noise variation. The Adjusted R-squared has risen to 93.33%, showing that this model accounts for 93.33% of the variance in y, a substantial improvement over the first model.
+
+```{r}
+plot(x2, y2, main = "Scatterplot with Least Squares and Population Regression Lines (Less Noise)", 
+     xlab = "x", ylab = "y", pch = 19, col = "blue")
+abline(lm(y2 ~ x2), col = "red", lwd = 2)
+abline(a = -1, b = 0.5, col = "green", lwd = 2, lty = 2)
+legend("topleft", legend = c("Least Squares Line", "Population Regression Line"),
+       col = c("red", "green"), lty = c(1, 2), lwd = 2)
+```
+
+With the lower variability in the residuals, the least squares line closely aligns with the true population regression line.
+
+
+#### Increasing noise
+
+```{r}
+set.seed(1)
+x3 <- rnorm(100, mean = 0, sd = 1)
+```
+
+```{r}
+set.seed(2)
+eps3 <- rnorm(100, mean = 0, sd = sqrt(4))
+```
+
+```{r}
+y3 <- -1 + 0.5 * x3 + eps3
+```
+
+```{r}
+plot(x3, y3, main = "Scatterplot of x vs y (More Noise)", xlab = "x", ylab = "y", pch = 19, col = "blue")
+abline(lm(y3 ~ x3), col = "red", lwd = 2)
+```
+
+```{r}
+model3 <- lm(y3 ~ x3)
+summary(model3)
+```
+
+The estimated intercept β\^0​=-1.0182 is close to the true value β0=-1, whereas β\^1=0.1029​ deviates notably from the true value β1=0.5, likely due to the higher noise introducing greater variability in the estimates. The Adjusted R-squared remains at 69.08%, which is lower than in the second model but higher than in the first.
+
+```{r}
+plot(x3, y3, main = "Scatterplot with Least Squares and Population Regression Lines (More Noise)", 
+     xlab = "x", ylab = "y", pch = 19, col = "blue")
+abline(lm(y3 ~ x3), col = "red", lwd = 2)
+abline(a = -1, b = 0.5, col = "green", lwd = 2, lty = 2)
+legend("topleft", legend = c("Least Squares Line", "Population Regression Line"),
+       col = c("red", "green"), lty = c(1, 2), lwd = 2)
+```
+
+When noise increases, the model fits less effectively, and the data points are dispersed more broadly around the regression line.
+
+
+#### 95% CI
+
+```{r}
+# Original
+confint(model)
+
+# Less noisy
+confint(model2)
+
+# Noisier
+confint(model3)
+```
+
+**Comment:** 
+Cleaner data produces far more precise estimates, shown by the narrower confidence intervals, while noisier data yields much less precise estimates, as seen in the wider intervals.
+
+In both the original and less noisy models, the slope estimates are significantly different from 0 since their confidence intervals exclude 0. In contrast, with the noisier data, the slope’s interval includes 0, indicating that higher noise makes it more difficult to identify the true relationship between x and y.

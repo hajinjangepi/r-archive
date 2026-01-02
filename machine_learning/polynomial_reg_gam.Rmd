@@ -1,0 +1,446 @@
+---
+title: "Polynomial/Step regression, GAM exploration"
+author: "Hajin Jang"
+date: "11/18/2025"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+## Polynomial regression
+
+```{r, message = FALSE, warning = FALSE}
+library(ISLR2)
+library(boot)
+library(ggplot2)
+```
+
+
+```{r}
+set.seed(4)
+
+delta <- rep(0, 10)
+
+for (i in 1:10) {
+    fit <- glm(wage ~ poly(age, i), data = Wage)
+    delta[i] <- cv.glm(Wage, fit, K = 10)$delta[1]
+}
+
+which.min(delta) 
+
+plot(1:10, delta, type = "b", xlab = "degree of polynomial", ylab = "MSE")
+points(which.min(delta), delta[which.min(delta)], col = "purple", cex = 2, pch = 20)
+```
+
+
+#### Fitting the model
+
+```{r}
+# best degree model
+fit.best <- glm(wage ~ poly(age, 4),data=Wage)
+summary(fit.best)
+
+# ANOVA
+fit1 <- lm(wage ~ age, data = Wage)
+fit2 <- lm(wage ~ poly(age, 2), data = Wage)
+fit3 <- lm(wage ~ poly(age, 3), data = Wage)
+fit4 <- lm(wage ~ poly(age, 4), data = Wage)
+fit5 <- lm(wage ~ poly(age, 5), data = Wage)
+fit6 <- lm(wage ~ poly(age, 6), data = Wage)
+fit7 <- lm(wage ~ poly(age, 7), data = Wage)
+fit8 <- lm(wage ~ poly(age, 8), data = Wage)
+fit9 <- lm(wage ~ poly(age, 9), data = Wage)
+fit10 <- lm(wage ~ poly(age, 10), data = Wage)
+anova(fit1, fit2, fit3, fit4, fit5, fit6, fit7, fit8, fit9, fit10)
+```
+
+
+```{r}
+# plot of the resulting polynomial fit to the data
+## age grid
+age.grid <- seq(from=min(Wage$age), to = max(Wage$age), length=100)
+## predict weight for each age on the grid
+age.pred <- predict(fit4, newdata=list(age=age.grid), se=TRUE)
+## plot the relationship
+plot(Wage$age, Wage$wage, xlim=c(min(Wage$age), max(Wage$age)), ylim=c(min(Wage$wage), max(Wage$wage)), xlab="Age", ylab="wage", main="Polynomial Parameterization")
+lines(age.grid, age.pred$fit, col = "purple", lwd = 3)
+```
+
+**Comment:** The optimal degree selected using cross-validation is d=4, corresponding to the minimum MSE. This indicates that model performance did not noticeably improve beyond a 4th-degree polynomial. However, the ANOVA results showed that only degrees 2, 3, and 9 were statistically significant (p<0.05). Thus, the optimal degree determined by cross-validation differs from the results obtained through hypothesis testing with ANOVA.
+
+
+#### Fitting a step function
+
+```{r}
+# I chose cut points from 2 to 10.
+for (i in 2:10) {
+  Wage$age.cut = cut(Wage$age, i)
+  fit = glm(wage~age.cut, data=Wage)
+  delta[i] = cv.glm(Wage, fit, K=10)$delta[1]
+}
+
+which.min(delta) # Best number of cuts is 8
+
+plot(2:10, delta[-1], type = "b", xlab = "Cut", ylab = "MSE")
+points(which.min(delta), delta[which.min(delta)], col = "purple", cex = 2, pch = 20)
+```
+
+
+```{r}
+# best model
+fit.cut.best <- glm(wage ~ cut(age, 8),data=Wage)
+summary(fit.cut.best)
+
+# plot of the resulting polynomial fit to the data
+## predict weight for each age on the grid
+age.pred <- predict(fit.cut.best, data.frame(age=age.grid))
+## plot the relationship
+plot(Wage$age, Wage$wage, xlim=c(min(Wage$age), max(Wage$age)), ylim=c(min(Wage$wage), max(Wage$wage)), xlab="Age", ylab="wage", main="Polynomial Parameterization")
+lines(age.grid, age.pred, col = "purple", lwd = 3)
+```
+
+**Comment:** The results show that the optimal number of cuts is 8, as it yields the lowest MSE based on cross-validation.
+
+
+
+## Stepwise selection
+
+```{r}
+library(leaps)
+library(gam)
+```
+
+
+```{r}
+head(College)
+
+set.seed(2)
+index <- sample(1:2, nrow(College), replace = T, prob = c(0.7, 0.3))
+
+train <- College[index == 1, ]
+test <- College[index == 2, ]
+
+col.fit.fwd <- regsubsets(Outstate ~ ., data = train, method = "forward")
+fwd.summary <- summary(col.fit.fwd)
+
+# Forward stepwise selection on the training set with cross validation
+predict.regsubsets <- function(fitobj, data, id) {
+  form <- as.formula(fitobj$call[[2]])
+  mat  <- model.matrix(form, data)
+  coefi <- coef(fitobj, id = id)
+  xvars <- names(coefi)
+  as.matrix(mat[, xvars]) %*% coefi
+}
+
+# set up k fold cross validation on the training data
+set.seed(2)
+k <- 10
+folds <- sample(1:k, size = nrow(train), replace = TRUE)
+
+nvmax <- ncol(train) - 1   # maximum number of predictors
+cv.mse <- matrix(NA, nrow = k, ncol = nvmax)
+
+for (j in 1:k) {
+  # fit forward stepwise on the training folds
+  fwd.fit.cv <- regsubsets(Outstate ~ ., 
+                           data   = train[folds != j, ], 
+                           method = "forward", 
+                           nvmax  = nvmax)
+  # evaluate models of size 1, 2, ..., nvmax on the validation fold
+  for (i in 1:nvmax) {
+    pred <- predict.regsubsets(fwd.fit.cv, 
+                               data = train[folds == j, ], 
+                               id   = i)
+    cv.mse[j, i] <- mean((train$Outstate[folds == j] - pred)^2)
+  }
+}
+
+# average validation MSE for each model size
+mean.cv.mse <- apply(cv.mse, 2, mean)
+plot(mean.cv.mse, xlab = "Number of Variables", 
+     ylab = "Cross validated MSE", type = "b")
+best.size <- which.min(mean.cv.mse)
+best.size
+```
+
+
+```{r}
+# refit forward stepwise on the full training set using the chosen size
+col.fit.fwd.final <- regsubsets(Outstate ~ ., 
+                                data   = train, 
+                                method = "forward", 
+                                nvmax  = best.size)
+
+best.model <- coef(col.fit.fwd.final, best.size)
+print(best.model)
+```
+
+**Comment:** Using 10 fold cross validation on the training set, the model with 15 predictors achieved the lowest validation MSE. I refitted a forward stepwise model with 15 variables on the full training data and found the final coefficients above.
+
+
+#### Fitting a GAM
+
+```{r}
+gam.lo.room <-gam(Outstate~lo(Room.Board, span=0.5), data=train)
+gam.lo.PhD <-gam(Outstate~lo(PhD, span=0.5), data=train)
+gam.lo.perc.alumni <-gam(Outstate~lo(perc.alumni, span=0.5), data=train)
+gam.lo.Expend <-gam(Outstate~lo(Expend, span=0.5), data=train)
+gam.lo.Grad.Rate <-gam(Outstate~lo(Grad.Rate, span=0.5), data=train)
+
+par(mfrow = c(2,3))
+plot.Gam(gam.lo.room);plot.Gam(gam.lo.PhD);plot.Gam(gam.lo.perc.alumni);plot.Gam(gam.lo.Expend);plot.Gam(gam.lo.Grad.Rate)
+```
+
+**Comment:** Based on the local regression plots,
+
+*Room.Board:* The relationship appears nearly linear, showing a slight upward trend as Room.Board increases.
+
+*PhD:* The pattern is clearly non-linear, showing a U-shaped curve, suggesting that including a quadratic term would capture this relationship well.
+
+*perc.alumni:* The trend increases roughly linearly, so a simple linear model should be appropriate.
+
+*Expend:* The curve rises sharply at lower values and then levels off, indicating that a log transformation or spline could better model this pattern.
+
+*Grad.Rate:* The relationship looks almost exponential, with a sharp increase as Grad.Rate grows; a quadratic or spline model may better represent this trend.
+
+
+##### Checking degrees of freedom
+
+```{r}
+#Check cv df for Room.Board
+room.sspcv1 <- smooth.spline(train$Room.Board, train$Outstate, cv = T)
+room.sspcv2 <- smooth.spline(train$Room.Board, train$Outstate, cv = F)
+room.sspcv1$df; room.sspcv2$df # df of 7 would be suitable
+
+# check cv df for PhD
+PhD.sspcv1 <- smooth.spline(train$PhD, train$Outstate, cv = T)
+PhD.sspcv2 <- smooth.spline(train$PhD, train$Outstate, cv = F)
+PhD.sspcv1$df; PhD.sspcv2$df # df of 5 would be suitable
+
+# check cv df for perc.alumni
+perc.sspcv1 <- smooth.spline(train$perc.alumni, train$Outstate, cv = T)
+perc.sspcv2 <- smooth.spline(train$perc.alumni, train$Outstate, cv = F)
+perc.sspcv1$df; perc.sspcv2$df # df of 2 would be suitable
+
+# check cv df for Expend
+Expend.sspcv1 <- smooth.spline(train$Expend, train$Outstate, cv = T)
+Expend.sspcv2 <- smooth.spline(train$Expend, train$Outstate, cv = F)
+Expend.sspcv1$df; Expend.sspcv2$df # df of 6 would be suitable
+
+# check cv df for Grad.Rate
+Grad.sspcv1 <- smooth.spline(train$Grad.Rate, train$Outstate, cv = T)
+Grad.sspcv2 <- smooth.spline(train$Grad.Rate, train$Outstate, cv = F)
+Grad.sspcv1$df; Grad.sspcv2$df # df of 7 would be suitable
+```
+
+**Comment:** The degree of freedom from cross-validation and generalized cross-validation are quite similar, so it's reasonable to select the df value that is closest between the two methods.
+
+
+##### Model1 - Smooth splines
+
+```{r}
+## fit a gam
+col.fit.gam1 <- gam(Outstate ~ Private + s(Room.Board, 7) + s(PhD, 5) + s(perc.alumni, 2) +
+  s(Expend, 6) + s(Grad.Rate, 7), data = train)
+summary(col.fit.gam1)
+
+## plot
+par(mfrow = c(2,3))
+plot.Gam(col.fit.gam1)
+
+## mse
+pred1 <- predict(col.fit.gam1, test)
+mse1 <- mean( (pred1-test$Outstate)^2)
+mse1
+```
+
+
+##### Model2 - Natural splines
+
+```{r}
+## fit a gam
+col.fit.gam2 <- gam(Outstate ~ Private + ns(Room.Board, 7) + ns(PhD, 5) + ns(perc.alumni, 2) +
+  ns(Expend, 6) + ns(Grad.Rate, 7), data = train)
+summary(col.fit.gam2)
+
+## plot
+par(mfrow = c(2,3))
+plot.Gam(col.fit.gam2)
+
+## mse
+pred2 <- predict(col.fit.gam2, test)
+mse2 <- mean( (pred2-test$Outstate)^2)
+mse2
+```
+
+
+##### Model3 - Cubic splines
+
+```{r}
+## fit a gam
+col.fit.gam3 <- gam(Outstate ~ Private + bs(Room.Board, 7) + bs(PhD, 5) + bs(perc.alumni, 2) +
+  bs(Expend, 6) + bs(Grad.Rate, 7), data = train)
+summary(col.fit.gam3)
+
+## plot
+par(mfrow = c(2,3))
+plot.Gam(col.fit.gam3)
+
+## mse
+pred3 <- predict(col.fit.gam3, test)
+mse3 <- mean( (pred3-test$Outstate)^2)
+mse3
+```
+
+
+##### Model4 - Linear (room, perc); Quadratic (PhD); Log (Expend); Spline (Grad)
+
+```{r}
+## fit a gam
+col.fit.gam4 <- gam(Outstate ~ Private + Room.Board + poly(PhD, 2) + perc.alumni +
+  log(Expend) + s(Grad.Rate, 7), data = train)
+summary(col.fit.gam4)
+
+## plot
+par(mfrow = c(2,3))
+plot.Gam(col.fit.gam4)
+
+## mse
+pred4 <- predict(col.fit.gam4, test)
+mse4 <- mean( (pred4-test$Outstate)^2)
+mse4
+```
+
+
+##### Model5 - Linear (room, perc); Quadratic (PhD); Spline (Expend, Grad)
+
+```{r}
+## fit a gam
+col.fit.gam5 <- gam(Outstate ~ Private + Room.Board + poly(PhD, 2) + perc.alumni +
+  s(Expend, 6) + s(Grad.Rate, 7), data = train)
+summary(col.fit.gam5)
+
+## plot
+par(mfrow = c(2,3))
+plot.Gam(col.fit.gam5)
+
+## mse
+pred5 <- predict(col.fit.gam5, test)
+mse5 <- mean( (pred5-test$Outstate)^2)
+mse5
+```
+
+
+##### Model6 - Linear (room, perc); Spline (PhD, Expend, Grad)
+
+```{r}
+## fit a gam
+col.fit.gam6 <- gam(Outstate ~ Private + Room.Board + s(PhD, 5) + perc.alumni +
+  s(Expend, 6) + s(Grad.Rate, 7), data = train)
+summary(col.fit.gam6)
+
+## plot
+par(mfrow = c(2,3))
+plot.Gam(col.fit.gam6)
+
+## mse
+pred6 <- predict(col.fit.gam6, test)
+mse6 <- mean( (pred6-test$Outstate)^2)
+mse6
+```
+
+
+##### Model7 - Linear (room, perc); Spline (PhD, Grad); Log (Expend)
+
+```{r}
+## fit a gam
+col.fit.gam7 <- gam(Outstate ~ Private + Room.Board + s(PhD, 5) + perc.alumni +
+  log(Expend) + s(Grad.Rate, 7), data = train)
+summary(col.fit.gam7)
+
+## plot
+par(mfrow = c(2,3))
+plot.Gam(col.fit.gam7)
+
+## mse
+pred7 <- predict(col.fit.gam7, test)
+mse7 <- mean( (pred7-test$Outstate)^2)
+mse7
+```
+
+
+##### Model8 - Linear (room, perc); Spline (PhD, Expend); Quadratic (Grad)
+
+```{r}
+## fit a gam
+col.fit.gam8 <- gam(Outstate ~ Private + Room.Board + s(PhD, 5) + perc.alumni +
+  s(Expend, 6) + poly(Grad.Rate, 2), data = train)
+summary(col.fit.gam8)
+
+## plot
+par(mfrow = c(2,3))
+plot.Gam(col.fit.gam8)
+
+## mse
+pred8 <- predict(col.fit.gam8, test)
+mse8 <- mean( (pred8-test$Outstate)^2)
+mse8
+```
+
+
+##### Compare MSE
+
+```{r}
+mse <- c(mse1, mse2, mse3, mse4, mse5, mse6, mse7, mse8)
+mse
+
+which.min(mse)
+```
+
+**Comment:** Model 5, which applies linear terms for room and perc, quadratic for PhD, spline for Expend and Grad, achieved the lowest MSE, making it the best model.
+
+In this question, I first used local regression for each numeric predictor to explore the shape of its relationship with the outcome and assess whether a parametric model could represent it well. Then, I applied cross-validation with smooth.spline() to determine the optimal df. Using these results, I fitted a series of GAMs where each numeric variable was modeled with smoothing, natural, or cubic splines based on the selected df. After that, I constructed the final GAM according to the observed relationship patterns and compared models using MSE to identify the best one.
+
+From the plots, Model 5 accurately captures the associations between predictors and out-of-state tuition. Linear terms for room and perc effectively describe their steady upward trends. The quadratic term for PhD represents the U-shaped pattern, where tuition decreases and then rises with increasing faculty PhD percentages. The spline for Expend (6 df) captures the steep initial rise and subsequent plateau, while the spline for Grad (7 df) models the sharp tuition increase at higher graduation rates.
+
+Overall, this model (combining linear, quadratic, and spline terms) offers a strong balance between flexibility and interpretability, and its low MSE indicates superior predictive performance.
+
+
+#### Model evaluation (test set)
+
+```{r}
+# prediction function for regsubsets objects
+predict.regsubsets <- function(fitobj, data, id) {
+  form  <- as.formula(fitobj$call[[2]])
+  mat   <- model.matrix(form, data)
+  coefi <- coef(fitobj, id = id)
+  xvars <- names(coefi)
+  as.matrix(mat[, xvars]) %*% coefi
+}
+
+## Forward stepwise CV selected model 
+pred_fwd <- predict.regsubsets(col.fit.fwd.final, data = test, id = best.size)
+mse_fwd  <- mean((test$Outstate - pred_fwd)^2)
+
+## Final GAM model
+pred_final <- predict(col.fit.gam5, newdata = test)
+mse_final  <- mean((test$Outstate - pred_final)^2)
+
+mse_fwd
+mse_final
+```
+
+**Comment:**
+For model selection, I compared the test MSE from the cross validated forward stepwise model with the test MSE of Model 5. The GAM model produced the lower test error, so Model 5 was selected as the final model (test MSE for Model 5 = 3395978 < 3912263).
+
+Private and room maintain strong linear effects, both with highly significant p-values (p < 2.2e-16). The quadratic term for PhD effectively captures the non-linear trend, significantly improving model fit (p < 2.2e-16). Perc also remains a significant positive predictor of tuition (p < 2.2e-16). The non-linear spline for Expend successfully models the complex relationship between institutional spending and tuition (p < 2e-16). The spline for Grad contributes additional improvement to model fit, though its effect is comparatively weaker (p = 0.0307).
+
+The MSE of 3395978 represents the average squared difference between predicted and actual tuition values on the test set. The deviance residuals, ranging from -7437 to 7956, suggest the model captures most of the data’s variability. Furthermore, the Residual Deviance (1847525350) is greatly reduced compared to the Null Deviance (8506861746), indicating that the model explains a substantial proportion of the variance in tuition.
+
+
+#### Evidence of a non-linear relationship
+
+Results from the GAM ANOVA provided clear evidence of non-linear relationships for several predictors. The spline for Expend showed a strong non-linear effect (edf = 5, F = 17.33, p = 6.661e-16). Grad.Rate also showed a significant non-linear effect (edf = 6, F = 2.34, p = 0.0307). PhD showed the significant quadratic term (overall F = 90.53, p < 2.2e-16). In contrast, Room.Board and perc.alumni had linear effects only (Df = 1, both p < 2.2e-16), indicating no evidence of additional non-linear structure for these variables.
+
+
