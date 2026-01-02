@@ -1,0 +1,992 @@
+---
+title: "Classification (LDA/QDA/Naive Bayes/Multinomial Logistic); KNN Regression; Interpretation"
+author: "Hajin Jang"
+date: "10/3/2025"
+output:
+  html_document: 
+    toc: TRUE
+    toc_depth: 2
+    toc_float: TRUE
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+### This analysis uses adult sleep data to compare multiple statistical and machine learning models for classifying sleep disorder types and predicting sleep duration based on demographic, clinical, and lifestyle factors.
+
+## About the data
+
+The dataset includes 374 adults with no missing values and contains demographic variables (age, sex, occupation), lifestyle factors (physical activity, stress, daily steps), and clinical measures (BMI category, blood pressure, pulse pressure, heart rate, sleep quality, and sleep duration). Sleep disorder status is categorized as none, insomnia, or sleep apnea, and blood pressure is represented using both a continuous measure (pulse pressure) and a binary indicator (hypertension). The data were cleaned, transformed, and split into training, validation, and testing sets. Classification models were applied to predict sleep disorder status, while regression and KNN approaches were used to predict sleep duration, allowing comparison of predictive performance and interpretability across modeling strategies.
+
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(tidy = TRUE)
+```
+
+
+## Data cleaning
+
+```{r clean}
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(FNN)
+library(MASS)
+library(nnet)
+library(gridExtra)
+
+sleep <- read_csv("sleep.csv")
+
+str(sleep)
+
+# check NA
+na_summary <- sapply(sleep, function(x) sum(is.na(x)))
+print(na_summary) # No NA
+```
+
+
+### String Variables
+
+```{r 1.string}
+# Gender
+sleep$gender_f <- factor(sleep$Gender)
+
+# Occupation
+table(sleep$Occupation)
+sleep$occup_f <- ifelse(sleep$Occupation %in% c("Doctor", "Nurse"), "Medical", "Non-medical")
+sleep$occup_f <- factor(sleep$occup_f)
+
+# BMI
+table(sleep$`BMI Category`)
+sleep$bmi_f <- ifelse(sleep$`BMI Category` %in% c("Overweight", "Obese"),"Overweight/Obese", "Normal")
+sleep$bmi_f <- factor(sleep$bmi_f)
+
+# Sleep disorder
+table(sleep$`Sleep Disorder`)
+sleep$disorder <- factor(sleep$`Sleep Disorder`, levels = c("None", "Insomnia", "Sleep Apnea"))
+
+# Blood pressure
+sleep <- sleep %>%
+  separate(`Blood Pressure`, into = c("SBP", "DBP"), sep = "/")
+sleep$SBP <- as.numeric(sleep$SBP)
+sleep$DBP <- as.numeric(sleep$DBP)
+
+str(sleep)
+head(sleep)
+summary(sleep)
+```
+
+
+### Continuous Variables
+
+```{r 2.continuous}
+# Remove ID
+sleep <- sleep[,-1]
+
+# Create PP
+sleep$PP <- sleep$SBP-sleep$DBP
+# Create hypertension
+sleep$htn <- ifelse(sleep$SBP>140 | sleep$DBP>90, 1, 0)
+
+# Check the variable (all continuous vars are numeric)
+str(sleep)
+
+# Check distributions
+continuous <- c("Age", "Sleep Duration", "Quality of Sleep", "Physical Activity Level", "Stress Level", "SBP","DBP", "PP", "Heart Rate", "Daily Steps")
+par(mfrow=c(2,3))  
+for (var in continuous) {
+  hist(sleep[[var]], main=paste("Distribution of", var), xlab=var, col="lightgreen", border="black")
+}
+
+sleep <- sleep %>%
+  rename(age = Age,
+         duration = `Sleep Duration`,
+         quality = `Quality of Sleep`,
+         pa = `Physical Activity Level`,
+         stress = `Stress Level`,
+         hr = `Heart Rate`,
+         steps = `Daily Steps`
+         ) %>%
+  dplyr::select(-`Gender`, -`Occupation`, -`BMI Category`, -`Sleep Disorder`)
+```
+
+All continuous variables look good. Quality of sleep and stress level are measured on a 0-10 scale and could potentially be used as categorical variables. However, with 374 observations, the sample size is not large enough to treat these variables as categorical. Therefore, in this project, they will be considered as continuous variables.
+
+
+### Training/Validation/Testing Sets
+
+```{r 3.tr.val.tst}
+set.seed(12345)
+
+# testing set (75%)
+index.tr <- sample(1:nrow(sleep), size = nrow(sleep) * 0.75, replace = FALSE)
+tr <- sleep[index.tr, ]
+
+# validation set (25%)
+val <- sleep[-index.tr, ]
+
+# check dimensions
+dim(sleep)   
+dim(tr)     
+dim(val)    
+
+# check proportions
+nrow(tr) / nrow(sleep)   
+nrow(val) / nrow(sleep) 
+```
+
+
+### Summary
+
+```{r 4.summary}
+skimr::skim(sleep)
+```
+
+The variables seem to be coded appropriately: categorical variables are treated as factors, and the summary statistics confirm that continuous variables are coded as continuous.
+
+**Gender:** Of 374 participants, 185 are female and 189 are male, showing a balanced gender split.
+
+**Age:** Ages range from 27–59, mostly clustered around 40–45 years, representing a middle-aged group with a slight right skew.
+
+**Occupation:** After collapsing 11 occupations into two categories, 144 participants had medical-related jobs and 230 had non-medical jobs, leaving a clear imbalance favoring non-medical professions.
+
+**Sleep Duration:** Ranges from 5.8–8.5 hours, with 7 hours most common, consistent with sleep guidelines.
+
+**Sleep Quality:** Rated 4–9, mostly 6–9, indicating generally good quality, though a few rated 4–5.
+
+**Physical Activity:** Ranges from 30–90 minutes/day, evenly distributed, reflecting diverse lifestyles.
+
+**Stress Level:** Rated 3–8 on a 10-point scale, with many reporting 7–8, suggesting some higher stress levels.
+
+**BMI:** Collapsed into “Normal” (216) vs. “Overweight/Obese” (158). Nearly half fall into the overweight/obese group, highlighting weight issues in this sample.
+
+**Blood Pressure:** SBP 115–142 mmHg, DBP 75–95 mmHg. Most fall in normal to slightly elevated ranges, with 18% classified as hypertensive. Pulse Pressure is centered around 45 mmHg with a few outliers.
+
+**Heart Rate:** Resting rates 65–86 bpm, mostly 65–75 bpm, suggesting overall cardiovascular health.
+
+**Daily Steps:** 3,000–10,000 steps, peaking around 8,000, reflecting moderate activity.
+
+**Sleep Disorder:** 219 reported no disorder, while 77 had Insomnia and 78 had Sleep Apnea.
+
+
+
+## Sleep Disorder Prediction
+
+### EDA
+
+```{r 1.eda}
+# For continuous variables analysis
+sleep_summary <- sleep %>%
+  group_by(disorder) %>%
+  summarize(
+    avg_age = mean(age),
+    median_age = median(age),
+    sd_age = sd(age),
+    iqr_age = IQR(age),
+    range_age = max(age) - min(age),
+    
+    avg_SBP = mean(SBP),
+    median_SBP = median(SBP),
+    sd_SBP = sd(SBP),
+    iqr_SBP = IQR(SBP),
+    range_SBP = max(SBP) - min(SBP),
+
+    avg_duration = mean(duration),
+    median_duration = median(duration),
+    sd_duration = sd(duration),
+    iqr_duration = IQR(duration),
+    range_duration = max(duration) - min(duration),
+
+    avg_quality = mean(quality),
+    median_quality = median(quality),
+    sd_quality = sd(quality),
+    iqr_quality = IQR(quality),
+    range_quality = max(quality) - min(quality),
+
+    avg_pa = mean(pa),
+    median_pa = median(pa),
+    sd_pa = sd(pa),
+    iqr_pa = IQR(pa),
+    range_pa = max(pa) - min(pa),
+
+    avg_stress = mean(stress),
+    median_stress = median(stress),
+    sd_stress = sd(stress),
+    iqr_stress = IQR(stress),
+    range_stress = max(stress) - min(stress),
+
+    avg_hr = mean(hr),
+    median_hr = median(hr),
+    sd_hr = sd(hr),
+    iqr_hr = IQR(hr),
+    range_hr = max(hr) - min(hr),
+
+    avg_steps = mean(steps),
+    median_steps = median(steps),
+    sd_steps = sd(steps),
+    iqr_steps = IQR(steps),
+    range_steps = max(steps) - min(steps)
+  )
+
+# For Categorical variable analysis.
+categorical_summary <- sleep %>%
+  group_by(disorder) %>%
+  summarize(
+    count_female = sum(gender_f == "Female"),
+    count_male = sum(gender_f == "Male"),
+    count_medical = sum(occup_f == "Medical"),
+    count_non_medical = sum(occup_f == "Non-medical"),
+    count_normal_bmi = sum(bmi_f == "Normal"),
+    count_overweight_obese = sum(bmi_f == "Overweight/Obese")
+  )
+
+# View summaries
+print(sleep_summary)
+print(categorical_summary)
+
+
+############### Exploratory graphic data analysis ###############
+
+# Grouped by sleep disorder
+p1 <- ggplot(sleep, aes(x = disorder, y = SBP)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  labs(title = "Systolic Blood Pressure (SBP) by Sleep Disorder", y = "Systolic Blood Pressure (mmHg)")
+
+p2 <- ggplot(sleep, aes(x = disorder, y = DBP)) +
+  geom_boxplot(fill = "lightgreen", color = "black") +
+  labs(title = "Diastolic Blood Pressure (DBP) by Sleep Disorder", y = "Diastolic Blood Pressure (mmHg)")
+
+p3 <- ggplot(sleep, aes(x = disorder, y = PP)) +
+  geom_boxplot(fill = "lightcoral", color = "black") +
+  labs(title = "Pulse Pressure by Sleep Disorder", y = "Pulse Pressure (mmHg)")
+
+p4 <- ggplot(sleep, aes(x = disorder, fill = factor(htn))) +
+  geom_bar(position = "fill") +
+  labs(title = "Proportion of Hypertension by Sleep Disorder", y = "Proportion", fill = "Hypertension")
+
+# Combine all plots into a 2x2 grid
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+
+# For other continuous variables
+# For age
+c1 <- ggplot(sleep, aes(x = disorder, y = age)) +
+  geom_boxplot(fill = "lightcoral", color = "black") +
+  labs(title = "Age by Sleep Disorder", x = "Sleep Disorder", y = "Age")
+
+# For duration
+c2 <- ggplot(sleep, aes(x = disorder, y = duration)) +
+  geom_boxplot(fill = "lightgreen", color = "black") +
+  labs(title = "Duration by Sleep Disorder", x = "Sleep Disorder", y = "Duration (hours)")
+
+# For quality
+c3 <- ggplot(sleep, aes(x = disorder, y = quality)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  labs(title = "Quality of Sleep by Sleep Disorder", x = "Sleep Disorder", y = "Quality of Sleep (scale 1-10)")
+
+# For physical activity level
+c4 <- ggplot(sleep, aes(x = disorder, y = pa)) +
+  geom_boxplot(fill = "lightgoldenrod", color = "black") +
+  labs(title = "Physical Activity Level by Sleep Disorder", x = "Sleep Disorder", y = "Physical Activity (minutes/day)")
+
+# For stress level
+c5 <- ggplot(sleep, aes(x = disorder, y = stress)) +
+  geom_boxplot(fill = "lightpink", color = "black") +
+  labs(title = "Stress Level by Sleep Disorder", x = "Sleep Disorder", y = "Stress Level (scale 1-10)")
+
+# For heart rate
+c6 <- ggplot(sleep, aes(x = disorder, y = hr)) +
+  geom_boxplot(fill = "lightseagreen", color = "black") +
+  labs(title = "Heart Rate by Sleep Disorder", x = "Sleep Disorder", y = "Heart Rate (bpm)")
+
+# For daily steps
+c7 <- ggplot(sleep, aes(x = disorder, y = steps)) +
+  geom_boxplot(fill = "lightsteelblue", color = "black") +
+  labs(title = "Daily Steps by Sleep Disorder", x = "Sleep Disorder", y = "Steps per Day")
+
+grid.arrange(c1, c2, c3, c4, c5, c6, c7, ncol = 3)
+```
+
+**Comment:**
+
+**SBP:** Participants with Sleep Apnea have the highest systolic blood pressure, with a median close to 140 mmHg and several values above that level. Those without any sleep disorder show the lowest systolic pressure with a median around 125 mmHg, while individuals with Insomnia fall in between at approximately 130 mmHg. This pattern indicates that sleep disorders, especially Sleep Apnea, are strongly associated with elevated systolic blood pressure and increased cardiovascular risk.
+
+**DBP:** A similar pattern is seen for diastolic blood pressure. Participants with Sleep Apnea have the highest median diastolic value, close to 90 mmHg, which is the clinical threshold for hypertension. Those without a sleep disorder show the lowest median value of about 80 mmHg, and participants with Insomnia fall in between at around 85 mmHg. These findings reinforce the relationship between sleep disorders and higher diastolic pressure.
+
+**PP:** Median pulse pressure shows little difference among the three groups. Although there are small variations, the distributions overlap substantially, suggesting that pulse pressure is not a strong factor distinguishing these groups.
+
+**Hypertension:** The prevalence of hypertension is much higher among individuals with Sleep Apnea, affecting nearly three-quarters of the group. In comparison, fewer participants with Insomnia or without sleep disorders are hypertensive, and the lowest proportion is observed in the group with no disorder. This emphasizes the strong link between Sleep Apnea and hypertension.
+
+**Age:** Sleep Apnea is more common among older participants, with a median age above 50 years. Participants with Insomnia are somewhat younger, while those without a sleep disorder are the youngest, with a median age around 40 years. This suggests that Sleep Apnea is particularly prevalent in older adults.
+
+**Duration:** Individuals with Insomnia report shorter sleep duration, with a median of about 6.5 hours per night. Those without a sleep disorder sleep around 7 hours, while Sleep Apnea participants report about 7.5 hours of sleep. Despite the longer duration, their rest may be of lower quality because of frequent interruptions.
+
+**Quality of Sleep:** Sleep quality is lowest among individuals with Insomnia, who report a median score near 4. Those without a sleep disorder report a much higher median of around 7. This is consistent with the difficulty falling or staying asleep that characterizes Insomnia.
+
+**Physical Activity Level:** Participants without a sleep disorder and those with Sleep Apnea report higher physical activity levels, with medians around 60 minutes per day. Those with Insomnia are less active, with a median of about 45 minutes per day, which may reflect fatigue from poor sleep.
+
+**Stress Level:** Stress levels are higher among participants with Insomnia and Sleep Apnea, with medians of about 6 to 7. Those without a sleep disorder report lower stress, with a median of about 5. This supports the connection between sleep disturbances and higher stress.
+
+**Heart Rate:** Participants with Sleep Apnea have slightly higher resting heart rates, with a median of about 75 beats per minute. Those without a sleep disorder have a lower median of about 70 beats per minute, and Insomnia participants fall in between. Elevated heart rate is consistent with the cardiovascular risks linked to Sleep Apnea.
+
+**Daily Steps:** Individuals without a sleep disorder take more steps on average, with a median of about 8,000 per day. Participants with Insomnia and Sleep Apnea take fewer steps, with Insomnia participants reporting the lowest median of about 5,000 per day. This suggests that poor sleep may reduce overall physical activity.
+
+
+
+### ML Analyses
+
+#### Categorical variables modeling
+
+During data cleaning, categorical variables such as gender, occupation, and BMI were converted into binary factors, which is appropriate for applying LDA, QDA, Naive Bayes, and multinomial logistic regression models. The outcome variable, sleep disorders, was coded as a factor with three categories. Other potential categorical variables, including quality of sleep and stress level, were treated as continuous variables and maintained in numeric form.
+
+
+#### LDA
+
+```{r 2.lda}
+library(MASS)
+library(caret)
+
+######## PP ########
+set.seed(1003)
+lda.pp <- lda(disorder ~ PP + gender_f + age + occup_f + duration + quality + pa + stress + bmi_f + hr + steps, data = tr)
+
+pred.lda.pp <- predict(lda.pp, newdata = val)$class
+conf.lda.pp <- confusionMatrix(pred.lda.pp, val$disorder)
+print(conf.lda.pp)
+
+# Accuracy, Sensitivity, Specificity
+print(lda.pp.acc <- conf.lda.pp$overall["Accuracy"])
+print(lda.pp.sens <- conf.lda.pp$byClass[, "Sensitivity"])
+print(lda.pp.spec <- conf.lda.pp$byClass[, "Specificity"])
+
+
+######## HTN ########
+set.seed(1003)
+lda.htn <- lda(disorder ~ htn + gender_f + age + occup_f + duration + quality + pa + stress + bmi_f + hr + steps, data = tr)
+
+pred.lda.htn <- predict(lda.htn, newdata = val)$class
+conf.lda.htn <- confusionMatrix(pred.lda.htn, val$disorder)
+print(conf.lda.htn)
+
+# Accuracy, Sensitivity, Specificity
+print(lda.htn.acc <- conf.lda.htn$overall["Accuracy"])
+print(lda.htn.sens <- conf.lda.htn$byClass[, "Sensitivity"])
+print(lda.htn.spec <- conf.lda.htn$byClass[, "Specificity"])
+```
+
+
+#### QDA
+
+```{r 2.qda}
+######## PP ########
+set.seed(1003)
+qda.pp <- qda(disorder ~ PP + gender_f + age + occup_f + duration + quality + pa + stress + bmi_f + hr + steps, data = tr)
+
+pred.qda.pp <- predict(qda.pp, newdata = val)$class
+conf.qda.pp <- confusionMatrix(pred.qda.pp, val$disorder)
+print(conf.qda.pp)
+
+# Accuracy, Sensitivity, Specificity
+print(qda.pp.acc <- conf.qda.pp$overall["Accuracy"])
+print(qda.pp.sens <- conf.qda.pp$byClass[, "Sensitivity"])
+print(qda.pp.spec <- conf.qda.pp$byClass[, "Specificity"])
+
+
+######## HTN ########
+set.seed(1003)
+qda.htn <- qda(disorder ~ htn + gender_f + age + occup_f + duration + quality + pa + stress + bmi_f + hr + steps, data = tr)
+
+pred.qda.htn <- predict(qda.htn, newdata = val)$class
+conf.qda.htn <- confusionMatrix(pred.qda.htn, val$disorder)
+print(conf.qda.htn)
+
+# Accuracy, Sensitivity, Specificity
+print(qda.htn.acc <- conf.qda.htn$overall["Accuracy"])
+print(qda.htn.sens <- conf.qda.htn$byClass[, "Sensitivity"])
+print(qda.htn.spec <- conf.qda.htn$byClass[, "Specificity"])
+```
+
+
+#### Naive Bayes
+
+```{r 2.nb}
+library(naivebayes)
+
+######## PP ########
+set.seed(1003)
+nb.pp <- naive_bayes(disorder ~ PP + gender_f + age + occup_f + duration + quality + pa + stress + bmi_f + hr + steps, data = tr)
+
+pred.nb.pp <- predict(nb.pp, newdata = val)
+conf.nb.pp <- confusionMatrix(pred.nb.pp, val$disorder)
+print(conf.nb.pp)
+
+# Accuracy, Sensitivity, Specificity
+print(nb.pp.acc <- conf.nb.pp$overall["Accuracy"])
+print(nb.pp.sens <- conf.nb.pp$byClass[, "Sensitivity"])
+print(nb.pp.spec <- conf.nb.pp$byClass[, "Specificity"])
+
+
+######## HTN ########
+set.seed(1003)
+nb.htn <- naive_bayes(disorder ~ htn + gender_f + age + occup_f + duration + quality + pa + stress + bmi_f + hr + steps, data = tr)
+
+pred.nb.htn <- predict(nb.htn, newdata = val)
+conf.nb.htn <- confusionMatrix(pred.nb.htn, val$disorder)
+print(conf.nb.htn)
+
+# Accuracy, Sensitivity, Specificity
+print(nb.htn.acc <- conf.nb.htn$overall["Accuracy"])
+print(nb.htn.sens <- conf.nb.htn$byClass[, "Sensitivity"])
+print(nb.htn.spec <- conf.nb.htn$byClass[, "Specificity"])
+```
+
+
+#### Multinomial Logistic
+
+```{r 2.mnr}
+library(nnet)
+
+######## PP ########
+set.seed(1003)
+mnr.pp <- multinom(disorder ~ PP + gender_f + age + occup_f + duration + quality + pa + stress + bmi_f + hr + steps, data = tr)
+
+pred.mnr.pp <- predict(mnr.pp, newdata = val)
+conf.mnr.pp <- confusionMatrix(pred.mnr.pp, val$disorder)
+print(conf.mnr.pp)
+
+# Accuracy, Sensitivity, Specificity
+print(mnr.pp.acc <- conf.mnr.pp$overall["Accuracy"])
+print(mnr.pp.sens <- conf.mnr.pp$byClass[, "Sensitivity"])
+print(mnr.pp.spec <- conf.mnr.pp$byClass[, "Specificity"])
+
+######## HTN ########
+set.seed(1003)
+mnr.htn <- multinom(disorder ~ htn + gender_f + age + occup_f + duration + quality + pa + stress + bmi_f + hr + steps, data = tr)
+
+pred.mnr.htn <- predict(mnr.htn, newdata = val)
+conf.mnr.htn <- confusionMatrix(pred.mnr.htn, val$disorder)
+print(conf.mnr.htn)
+
+# Accuracy, Sensitivity, Specificity
+print(mnr.htn.acc <- conf.mnr.htn$overall["Accuracy"])
+print(mnr.htn.sens <- conf.mnr.htn$byClass[, "Sensitivity"])
+print(mnr.htn.spec <- conf.mnr.htn$byClass[, "Specificity"])
+```
+
+
+#### Table
+
+```{r}
+# Create results data frame
+results <- data.frame(
+  Method   = c("LDA", "LDA", "QDA", "QDA", "Naive Bayes", "Naive Bayes", "Multinomial Logistic", "Multinomial Logistic"),
+  BP_Var   = c("PP", "HTN", "PP", "HTN", "PP", "HTN", "PP", "HTN"),
+  Accuracy = c(lda.pp.acc, lda.htn.acc,
+               qda.pp.acc, qda.htn.acc,
+               nb.pp.acc, nb.htn.acc,
+               mnr.pp.acc, mnr.htn.acc),
+  Sens1    = c(lda.pp.sens[1], lda.htn.sens[1],
+               qda.pp.sens[1], qda.htn.sens[1],
+               nb.pp.sens[1], nb.htn.sens[1],
+               mnr.pp.sens[1], mnr.htn.sens[1]),
+  Sens2    = c(lda.pp.sens[2], lda.htn.sens[2],
+               qda.pp.sens[2], qda.htn.sens[2],
+               nb.pp.sens[2], nb.htn.sens[2],
+               mnr.pp.sens[2], mnr.htn.sens[2]),
+  Sens3    = c(lda.pp.sens[3], lda.htn.sens[3],
+               qda.pp.sens[3], qda.htn.sens[3],
+               nb.pp.sens[3], nb.htn.sens[3],
+               mnr.pp.sens[3], mnr.htn.sens[3]),
+  Spec1    = c(lda.pp.spec[1], lda.htn.spec[1],
+               qda.pp.spec[1], qda.htn.spec[1],
+               nb.pp.spec[1], nb.htn.spec[1],
+               mnr.pp.spec[1], mnr.htn.spec[1]),
+  Spec2    = c(lda.pp.spec[2], lda.htn.spec[2],
+               qda.pp.spec[2], qda.htn.spec[2],
+               nb.pp.spec[2], nb.htn.spec[2],
+               mnr.pp.spec[2], mnr.htn.spec[2]),
+  Spec3    = c(lda.pp.spec[3], lda.htn.spec[3],
+               qda.pp.spec[3], qda.htn.spec[3],
+               nb.pp.spec[3], nb.htn.spec[3],
+               mnr.pp.spec[3], mnr.htn.spec[3])
+)
+
+print(results)
+```
+
+| Method              | SPB Variable | Accuracy | Sens 1  | Sens 2  | Sens 3  | Spec 1  | Spec 2  | Spec 3  |
+|---------------------|--------------|----------|---------|---------|---------|---------|---------|---------|
+| LDA                 | PP           | 0.8936   | 0.8627  | 0.9524  | 0.9091  | 0.9302  | 0.9452  | 0.9583  |
+|                     | HTN          | 0.8830   | 0.8627  | 0.9048  | 0.9091  | 0.9302  | 0.9315  | 0.9583  |
+| QDA                 | PP           | 0.8936   | 0.8824  | 0.9048  | 0.9091  | 0.9302  | 0.9452  | 0.9583  |
+|                     | HTN          | 0.9149   | 0.9216  | 0.9048  | 0.9091  | 0.9302  | 0.9726  | 0.9583  |
+| Naive Bayes         | PP           | 0.8723   | 0.8431  | 0.9048  | 0.9091  | 0.9302  | 0.9178  | 0.9583  |
+|                     | HTN          | 0.8723   | 0.8431  | 0.9048  | 0.9091  | 0.9302  | 0.9178  | 0.9583  |
+| Multonomial Logistic| PP           | 0.9149   | 0.9020  | 0.9524  | 0.9091  | 0.9302  | 0.9863  | 0.9444  |
+|                     | HTN          | 0.8936   | 0.8824  | 0.9048  | 0.9091  | 0.9302  | 0.9589  | 0.9444  |
+
+
+
+### Interpretation
+
+#### Blood Pressure Parameterization
+
+Based on the validation results, the preferred blood pressure parameterization varied by model.  
+For LDA, the model using pulse pressure (PP) showed slightly higher accuracy compared to the HTN version.  
+For QDA, the HTN-based model outperformed PP, achieving the highest overall accuracy among all models.  
+For Naive Bayes, the performance was essentially identical between PP and HTN.  
+For Multinomial Logistic regression, the PP version provided better accuracy and specificity than the HTN version.  
+
+The preferred parameterization varies by model. For LDA and Multinomial Logistic Regression, pulse pressure (PP) produced higher accuracy than HTN, whereas for QDA the HTN version performed better. For Naive Bayes, both parameterizations yielded identical performance. 
+
+If I had to recommend one parameterization overall, pulse pressure (PP) would be preferred. This is because PP performed better in two of the four models (LDA and Multinomial Logistic), tied in one model (Naive Bayes), and was only outperformed by HTN in QDA. Moreover, PP provides more continuous variation and may capture subtler differences across groups compared to a binary HTN indicator.  
+
+```{r 3a.bpEDA}
+# Re-check distributions of PP and HTN by sleep disorder
+aggregate(PP ~ disorder, data = sleep, mean)
+aggregate(htn ~ disorder, data = sleep, mean)
+
+# Or boxplot/prop plot again
+boxplot(PP ~ disorder, data = sleep,
+        main = "Pulse Pressure by Sleep Disorder",
+        col = "lightgreen")
+prop.table(table(sleep$disorder, sleep$htn), 1)
+
+```
+
+The exploratory analysis in part 1 showed that pulse pressure (PP) did not differ much across sleep disorder groups, while hypertension (HTN) was clearly more common among individuals with Sleep Apnea. The modeling results are mostly consistent with this observation: HTN performed well in QDA, reflecting its strong univariate association with Sleep Apnea, but PP provided better or equally good accuracy in other models by capturing more continuous variation. Together, this suggests that although HTN is a strong simple indicator, PP may add more flexibility and predictive value in multivariate settings.
+
+
+#### Risk determination
+
+##### Model selection
+
+```{r 3b.RiskModel}
+# Compare overall accuracy for all models to identify the best for prediction
+acc_values <- data.frame(
+  Method = c("LDA_PP", "LDA_HTN",
+             "QDA_PP", "QDA_HTN",
+             "NB_PP", "NB_HTN",
+             "MNR_PP", "MNR_HTN"),
+  Accuracy = c(lda.pp.acc, lda.htn.acc,
+               qda.pp.acc, qda.htn.acc,
+               nb.pp.acc, nb.htn.acc,
+               mnr.pp.acc, mnr.htn.acc)
+)
+
+print(acc_values)
+
+# Identify the best-performing model
+best_model <- acc_values[which.max(acc_values$Accuracy), ]
+print(best_model)
+
+probs.mnr.pp <- predict(mnr.pp, newdata = val, type = "prob")
+head(probs.mnr.pp)  # show predicted risks for each class
+```
+
+**Comment:** For the purpose of estimating patient risk in a clinical setting, the most appropriate model is the multinomial logistic regression with pulse pressure (PP). This model achieved one of the highest overall accuracies and, importantly, provides predicted probabilities for each outcome category (None, Insomnia, Sleep Apnea). These probabilities can be directly interpreted as a patient’s estimated risk of each type of sleep disorder, which is exactly what a clinician would need when evaluating patients. While QDA with HTN also performed well in terms of accuracy, multinomial logistic regression is more interpretable and yields clinically useful risk estimates.
+
+
+##### Final accuracy, sensitivity, specificity
+
+```{r 3b.metrics}
+# Final chosen model performance
+print(mnr.pp.acc)
+print(mnr.pp.sens)
+print(mnr.pp.spec)
+```
+
+**Comment:** For the final model (Multinomial Logistic Regression with PP), the validation set accuracy was approximately 0.915. Sensitivity values across the three classes ranged from about 0.90 to 0.95, and specificity values were all above 0.93. These metrics indicate that the model performs consistently well in correctly identifying each sleep disorder category as well as distinguishing patients without the condition.
+
+
+##### Explanation for a practitioner
+
+The final model we selected was a multinomial logistic regression using pulse pressure (PP) and other patient predictors including gender, age, occupation, sleep duration, sleep quality, physical activity, BMI, stress, heart rate, and daily steps. The model achieved an overall accuracy of about 91%, which means it correctly classified sleep disorders in roughly 91 out of 100 patients.  
+
+In terms of sensitivity, the model was able to detect patients with no disorder, insomnia, and sleep apnea at rates around 90–95%, while also maintaining high specificity above 93% across all categories. For example, this means the model is very unlikely to miss patients with sleep apnea and also rarely misclassifies patients who do not have a disorder.  
+
+From a clinical perspective, the most important feature of this model is that it provides estimated probabilities for each diagnosis. For a given patient, the clinician can see the likelihood of no disorder, insomnia, or sleep apnea, and use that information to guide further diagnostic testing and treatment decisions. In practice, this model serves as a reliable tool to support risk assessment in a sleep clinic, helping to prioritize patients who are most likely to benefit from further evaluation and intervention.
+
+
+#### Sleep disorders
+
+##### Model selected
+
+```{r 3c.RelationshipModel}
+# Multinomial logistic regression with PP
+summary(mnr.pp)  # coefficients, standard errors, significance
+```
+
+**Comment:** For examining relationships, I would use the multinomial logistic regression model with pulse pressure (PP). This model provides interpretable coefficients and statistical significance tests, which allow us to see how each variable is associated with the likelihood of having insomnia or sleep apnea compared with no disorder. Unlike LDA, QDA, or Naive Bayes, which primarily focus on classification accuracy, multinomial logistic regression gives direct insight into variable effects, making it the most appropriate choice when the goal is interpretation rather than prediction.
+
+
+##### Variables selected
+
+```{r 3c.Variables}
+coefs <- summary(mnr.pp)$coefficients
+std_err <- summary(mnr.pp)$standard.errors
+zval <- coefs / std_err
+pval <- 2 * (1 - pnorm(abs(zval)))
+pval
+```
+
+**Comment:** The regression output suggests that several predictors are significantly associated with sleep disorders. For insomnia, significant variables included gender, age, sleep duration, sleep quality, and daily steps, indicating that shorter sleep, lower quality, and fewer steps increase the odds of insomnia. For sleep apnea, significant predictors were BMI (overweight/obese), heart rate, and daily steps, with higher BMI and heart rate associated with greater odds of sleep apnea. These variables are identified because they had statistically significant p-values and align with clinical knowledge about sleep disorders.
+
+
+##### Final accuracy, sensitivity, specificity
+
+```{r 3c.metrics}
+print(mnr.pp.acc)
+print(mnr.pp.sens)
+print(mnr.pp.spec)
+```
+
+**Comment:** The final multinomial logistic regression model with PP achieved an overall accuracy of approximately 91%. Sensitivity values were around 90–95% across the three classes, and specificity values exceeded 93% for all groups. These results indicate the model not only fits the data well but also generalizes effectively across the different sleep disorder categories.
+
+
+##### Explanation for a practitioner
+
+The final model helps us understand which factors are most important in distinguishing between no disorder, insomnia, and sleep apnea. For example, people who report shorter and poorer quality sleep and take fewer daily steps are more likely to experience insomnia, while individuals with higher BMI and elevated heart rate are at greater risk of sleep apnea. The model is accurate in about 9 out of 10 cases and provides reliable estimates across all groups. For a clinician, this means the tool can highlight which risk factors are most concerning for a given patient and support decisions about further diagnostic testing and targeted interventions.
+
+
+
+## Sleep Duration Prediction 
+
+### Preprocessing
+
+```{r 2.1PreProcess}
+### Preprocessing
+sleep2 <- sleep %>%
+  mutate(
+    gender_n = ifelse(gender_f == "Female", 0, 1),  
+    occup_n = ifelse(occup_f == "Medical", 1, 0),
+    bmi_n = ifelse(bmi_f == "Normal", 0, 1),
+    disorder_n = ifelse(disorder == "None", 0, ifelse(disorder == "Insomnia", -1, 1))
+  )
+
+# Remove DBP, PP, HTN
+sleep2 <- sleep2 %>% dplyr::select(-DBP, -PP, -htn)
+
+# Create a new training, validation, testing set.
+set.seed(12345)
+index.tr.val2 <- sample(1:nrow(sleep2), size=nrow(sleep2)*0.75, replace = FALSE) 
+
+# Testing set (25% of the entire dataset)
+test2 <- sleep2[-index.tr.val2, ]
+# Combined training and validation set (50%+25%=75%)
+tr.val2 <- sleep2[index.tr.val2, ]
+
+index.tr2 <- sample(1:nrow(tr.val2), size=nrow(tr.val2)*0.67, replace = FALSE)
+# Training set (67% of the 75% of dataset == 50% of the entire dataset)
+tr2 <- tr.val2[index.tr2, ]
+# Validation set (33% of the 75% of dataset == 25% of the entire dataset)
+val2 <- tr.val2[-index.tr2, ]
+
+# Check the number 
+dim(sleep2); dim(tr.val2); dim(test2); dim(tr2); dim(val2)
+```
+
+#### Centering and scaling
+
+```{r}
+### Centering/scaling
+
+# Training set
+xmat.tr <- model.matrix(duration ~ SBP + gender_n + age + occup_n + quality + pa + stress + bmi_n + hr + steps + factor(disorder_n), data = tr2) # I split the disorder variable into two dummy variables, since treating it as a continuous variable would not be appropriate.
+
+str(xmat.tr)
+xmat.tr <- xmat.tr[, -1]
+
+# Standardize continuous variables
+con.tr <- as.data.frame(xmat.tr[ ,c(1,3,5,6,7,9,10)])
+cat.tr <- xmat.tr[, c(2,4,8,11,12)]
+preProcVals<- preProcess(con.tr, method=c("center", "scale")) 
+con.tr.z <- predict(preProcVals, con.tr)
+tr.z <- cbind(con.tr.z, cat.tr)
+dim(tr.z)
+tr.z[1:10,]
+
+# Validation set
+xmat.val <- model.matrix(duration ~ SBP + gender_n + age + occup_n + quality + pa + stress + bmi_n + hr + steps + factor(disorder_n), data = val2)
+str(xmat.val)
+xmat.val <- xmat.val[, -1]
+
+con.val <- as.data.frame(xmat.val[, c(1,3,5,6,7,9,10)])
+cat.val <- xmat.val[, c(2,4,8,11,12)]
+con.val.z <- predict(preProcVals, con.val)
+val.z <- cbind(con.val.z, cat.val)
+dim(val.z)
+val.z[1:10,]
+
+# Combined training and validation set
+xmat.tr.val <- model.matrix(duration ~ SBP + gender_n + age + occup_n + quality + pa + stress + bmi_n + hr + steps + factor(disorder_n), data = tr.val2) 
+xmat.tr.val <- xmat.tr.val[, -1]
+con.tr.val <- as.data.frame(xmat.tr.val[ ,c(1,3,5,6,7,9,10)])
+cat.tr.val <- xmat.tr.val[, c(2,4,8,11,12)]
+preProcVals2<- preProcess(con.tr.val, method=c("center", "scale")) 
+con.tr.val.z <- predict(preProcVals2, con.tr.val)
+tr.val.z <- cbind(con.tr.val.z, cat.tr.val)
+dim(tr.val.z)
+tr.val.z[1:10,]
+
+# Testing set
+xmat.test <- model.matrix(duration ~ SBP + gender_n + age + occup_n + quality + pa + stress + bmi_n + hr + steps + factor(disorder_n), data = test2)
+xmat.test <- xmat.test[, -1]
+
+con.test <- as.data.frame(xmat.test[, c(1,3,5,6,7,9,10)])
+cat.test <- xmat.test[, c(2,4,8,11,12)]
+con.test.z <- predict(preProcVals2, con.test) # preProcVals from training + validation sets was used.
+test.z <- cbind(con.test.z, cat.test)
+dim(test.z)
+test.z[1:10,]
+```
+
+#### Summary of preprocessing
+
+```{r 2.1ProcVar}
+summary(tr.z)
+skimr::skim(tr.z)
+```
+
+**Comment:** The dataset seems suitable, as it now includes all necessary numeric variables for modeling. The continuous variables are properly standardized with a mean of 0 and a standard deviation of 1, and the categorical variables have been converted using one-hot encoding.
+
+
+### EDA
+
+```{r 2.2EDA}
+# Plot correlation plot on continuous variables
+library(ggcorrplot)
+continuous_vars <- sleep2 %>%
+  dplyr::select(duration, age, quality, pa, stress, hr, steps)
+
+cor_matrix <- cor(continuous_vars, use = "complete.obs")
+
+ggcorrplot(cor_matrix, lab = TRUE, lab_size = 3, method = "circle", 
+           colors = c("red", "white", "blue"), title = "Correlation Matrix: Sleep Duration vs. Other Variables")
+
+
+# Plot the relationship of key variables with sleep duration
+g1<- ggplot(sleep2, aes(x = SBP, y = duration)) + 
+  geom_point() + geom_smooth(method = 'lm', col = 'blue') + labs(title = "SBP vs Sleep Duration")
+
+g2<- ggplot(sleep2, aes(x = age, y = duration)) + 
+  geom_point() + geom_smooth(method = 'lm', col = 'blue') + labs(title = "Age vs Sleep Duration")
+  
+g3<- ggplot(sleep2, aes(x = gender_f, y = duration)) + 
+  geom_boxplot(fill = "lightblue", color = "black") + labs(title = "Gender vs Sleep Duration")
+
+g4<-ggplot(sleep2, aes(x = stress, y = duration)) + 
+  geom_point() + geom_smooth(method = 'lm', col = 'blue') + labs(title = "Stress vs Sleep Duration")
+
+g5<- ggplot(sleep2, aes(x = occup_f, y = duration)) + 
+  geom_boxplot(fill = "lightgreen", color = "black") + labs(title = "occupation vs Sleep Duration")
+
+g6<-ggplot(sleep2, aes(x = quality, y = duration)) + 
+  geom_point() + geom_smooth(method = 'lm', col = 'blue') + labs(title = "quality of sleep vs Sleep Duration")
+
+g7<-ggplot(sleep2, aes(x = pa, y = duration)) + 
+  geom_point() + geom_smooth(method = 'lm', col = 'blue') + labs(title = "Physical activity vs Sleep Duration")
+
+g8<- ggplot(sleep2, aes(x = bmi_f, y = duration)) + 
+  geom_boxplot(fill = "lightpink", color = "black") + labs(title = "BMI vs Sleep Duration")
+
+g9<-ggplot(sleep2, aes(x = hr, y = duration)) + 
+  geom_point() + geom_smooth(method = 'lm', col = 'blue') + labs(title = "Heart rate vs Sleep Duration")
+
+g10<-ggplot(sleep2, aes(x = steps, y = duration)) + 
+  geom_point() + geom_smooth(method = 'lm', col = 'blue') + labs(title = "Steps vs Sleep Duration")
+
+g11<- ggplot(sleep2, aes(x = disorder, y = duration)) + 
+  geom_boxplot(fill = "lightyellow", color = "black") + labs(title = "Sleep disorders vs Sleep Duration")
+
+grid.arrange(g1, g2,g4,g6,g7,g9,g10,  ncol = 3)
+grid.arrange(g3,g5,g8,g11,  ncol = 2)
+```
+
+**Age:** Age shows a moderate positive correlation with sleep duration (0.34), suggesting that older individuals generally sleep a bit longer. However, the effect is relatively modest, indicating that age alone is not a strong determinant of sleep duration.
+
+**Quality of Sleep:** Sleep quality is highly correlated with sleep duration (0.88). People who report better sleep quality also tend to sleep longer, which is expected since restful, uninterrupted sleep is typically associated with longer duration.
+
+**Stress:** Stress demonstrates a strong negative correlation with sleep duration (-0.81). Higher stress levels are linked to shorter sleep, consistent with the understanding that stress can disrupt both the quality and quantity of sleep.
+
+**Physical Activity (PA):** The correlation between physical activity and sleep duration is weak (0.21). While being more active may contribute to improved sleep, the relationship here is small, suggesting that other factors play a more important role.
+
+**Heart Rate:** Resting heart rate has a moderate negative correlation with sleep duration (-0.52). Individuals with higher heart rates, possibly reflecting greater stress or cardiovascular strain, tend to sleep less.
+
+**Steps:** Daily step counts are essentially unrelated to sleep duration (-0.04). This implies that overall daily movement, at least as measured by steps, does not directly affect how long people sleep.
+
+**Gender:** No meaningful difference in sleep duration is observed between males and females.
+
+**Occupation:** Participants with medical-related jobs sleep slightly longer than those in non-medical professions, which may reflect differences in lifestyle or stress exposure.
+
+**BMI:** Individuals with normal BMI generally sleep longer than those classified as overweight or obese. This is consistent with evidence linking obesity to poorer sleep quality and conditions like Sleep Apnea.
+
+**Sleep Disorders:** Sleep duration is longest among individuals without a sleep disorder. Those with Insomnia have the shortest duration, while people with Sleep Apnea tend to report longer sleep, though their rest is often fragmented or of lower quality.
+
+
+### ML Analyses
+### Linear regression
+
+#### Full model
+
+```{r 3.FullModel}
+lm <- lm(duration ~ SBP + gender_f + age + occup_f + quality + pa + stress + bmi_f + hr + steps + disorder, data = tr2)
+
+summary(lm)
+```
+
+
+#### Reduced model
+
+```{r 3.ReducedModel}
+lm.reduced <- step(lm, direction = "both")
+
+summary(lm.reduced)
+```
+
+#### Reduced model justification
+
+The final reduced model was obtained using stepwise selection, which combines forward and backward procedures to determine the most suitable set of predictors based on AIC.
+
+The process began with a full model containing all candidate predictors. In the backward approach, variables were removed one at a time beginning with the least significant, and a variable was dropped if doing so improved or did not meaningfully worsen the model fit as measured by AIC. In the forward approach, predictors were introduced starting from none, and only those that significantly enhanced model fit were retained.
+
+Decisions about including or excluding variables were guided by the Akaike Information Criterion (AIC), which balances model fit with parsimony. The algorithm stops once no further changes in variables improve AIC. Using this process, the stepwise procedure converged at an AIC of -437.57. The final model retained SBP, gender, age, occupation, sleep quality, physical activity, stress, BMI, heart rate, and steps, all of which were statistically significant with p-values below 0.05.
+
+
+#### MSE in validation set
+
+```{r 3.MSEVal}
+anova(lm.reduced, lm) 
+
+pred.lm <- predict(lm.reduced, newdata = val2)
+mse.lm.val <- mean((val2$duration - pred.lm)^2)
+mse.lm.val  
+```
+
+Since the p-value is greater than 0.05, there is no significant difference between the two models. Therefore, it is more appropriate to retain the reduced model, as it achieves a similar fit with fewer covariates.
+
+
+### KNN regression
+
+```{r 4.KNNtrval}
+set.seed(12345)
+mKnnReg <- function(trainDat, validDat, trainOut, validOut, k){
+ mseKNN <- rep(NA, times=length(k))
+ for (i in 1:length(k)) {
+ out <- FNN::knn.reg(train=trainDat, test=validDat, y=trainOut, k=k[i])
+ mseKNN[i] <- mean((out$pred-validOut)^2)    
+}
+ return(mseKNN)
+}
+
+Kvec <- 1:30
+ 
+mseKNN <- mKnnReg(trainDat=tr.z, validDat=val.z, trainOut=tr2$duration, validOut=val2$duration, k=Kvec)
+mseKNN
+```
+
+#### Optimal K justification
+
+```{r 4.Kval}
+plot(Kvec, mseKNN, type="l", xlab="K", ylab="MSE")
+
+kopt <- which.min(mseKNN)
+kopt
+```
+
+The optimal value of k is 1, as this choice produces the lowest mean squared error (MSE).
+
+
+#### Optimal K MSE 
+
+```{r 4.KNNMSE}
+final.knn <- knn.reg(train = tr.z, test = val.z, y = tr2$duration, k=kopt)
+mse.knn.val <- mean((final.knn$pred - val2$duration)^2)
+mse.knn.val
+```
+
+
+### Final model selection
+
+```{r 5.KNNTestError}
+which.min(c(mse.lm.val, mse.knn.val))
+```
+
+**Comment:** After evaluating the models, I selected KNN as the final model because it achieved a lower MSE on the validation set compared to linear regression. A smaller MSE suggests that KNN provides more accurate predictions of sleep duration by reducing the gap between predicted and observed values. Furthermore, as a non-parametric method, KNN is able to capture complex, non-linear patterns in the data that linear regression may not fully account for.
+
+
+### Interpretation
+
+#### Predicting amount of sleep
+
+```{r 6a.model}
+final.knn <- knn.reg(train = tr.val.z, test = test.z, y = tr.val2$duration, k=kopt)
+summary(final.knn)
+final.knn
+
+mse.knn.test <- mean((final.knn$pred - test2$duration)^2)
+mse.knn.test
+```
+
+I used the combined training and validation set to build the final model, and then evaluated its performance on the testing set. 
+The mean squared error (MSE) was calculated by comparing the model’s predicted values against the actual outcomes in the testing set.
+
+I would select the KNN model. Compared to linear regression, KNN achieved a lower MSE on the validation set, indicating better predictive accuracy for sleep duration. Since the primary objective is to minimize prediction error, KNN is more suitable. Sleep duration is likely influenced by complex, non-linear interactions with factors such as stress, activity level, and BMI. KNN can capture these patterns without imposing a linear structure, making it more effective at modeling such relationships.
+
+
+##### Explanation for a practitioner
+
+In this model, we used k-Nearest Neighbors to predict patients’ sleep duration based on predictors including SBP, age, gender, occupation, sleep quality, physical activity, stress, BMI, heart rate, daily steps, and sleep disorder status. The final model was trained on the combined training and validation data, and its accuracy was assessed using a separate testing set. It achieved strong performance, with a test set MSE of 0.0063, showing that predicted values were very close to the actual sleep durations. To put this into perspective, the small error means that the model’s predictions closely mirror what patients actually reported, with sleep durations in the test set ranging from 5.9 to 8.1 hours. In practical terms, this indicates that the model can provide reliable estimates of sleep patterns using easily collected health information, which could help practitioners identify patients who may be at risk for insufficient or poor-quality sleep.
+
+
+#### Sleep duration
+
+##### Final model selected
+
+```{r 6b.model}
+# Build a linear regression model with the selected predictors, trained on the combined training and validation dataset
+final.lm <- lm(duration ~ SBP + gender_f + age + occup_f + pa + stress + bmi_f + hr, data = tr.val2)
+
+summary(final.lm)
+
+# Apply the model to the test set to generate predicted sleep duration values
+predict.lm.test <- predict(final.lm, newdata = test2)
+# Calculate the MSE on the test set to assess how well the model predicts sleep duration
+mse.lm.test <- mean((predict.lm.test - test2$duration)^2)
+mse.lm.test
+```
+
+**Comment:** I selected the linear regression model. Compared to KNN, linear regression provides a simpler and more interpretable framework for understanding the data. Its coefficients clearly show the direction, strength, and significance of each predictor’s effect on sleep duration. This makes linear regression the preferred option when the primary goal is to explain how different factors influence sleep duration.
+
+
+##### Variables selected
+
+The final reduced linear regression model retained SBP, gender, age, occupation, physical activity, stress, BMI, and heart rate. All of these predictors were statistically significant (p-value < 0.05), indicating that each has a meaningful association with the outcome variable, sleep duration.
+
+
+#### Explanation for a practitioner
+
+In this analysis, I applied a linear regression model to predict sleep duration using predictors including systolic blood pressure (SBP), gender, age, occupation, physical activity, stress, BMI, and heart rate. The model was trained on the combined training and validation sets and then evaluated on the testing set.
+
+The model showed strong performance, with a residual standard error of 0.2955 and an R-squared of 86.9%, which means it explained almost 87% of the differences in sleep duration among individuals. On the testing set, the model achieved an MSE of 0.082, indicating that the predicted values were very close to the actual sleep times and that the model can be considered accurate for practical use.
+
+For individual predictors:
+
+**SBP:** Each one-unit increase in systolic blood pressure is linked to a 0.02-hour reduction in sleep duration, reflecting a negative association. 
+
+**Gender:** On average, males sleep 0.48 hours longer than females, when holding other variables constant. 
+
+**Age:** Each additional year of age is associated with 0.05 more hours of sleep, suggesting older participants sleep slightly longer. 
+
+**Occupation:** Those in non-medical fields sleep 0.22 hours less than individuals in medical professions. 
+
+**Physical Activity:** Every extra minute of physical activity corresponds to an increase of 0.004 hours of sleep. Though small, this effect is statistically significant. 
+
+**Stress:** Stress exerts the strongest influence. Each one-unit rise in stress level decreases sleep duration by 0.38 hours, highlighting stress as a key factor reducing sleep. 
+
+**BMI:** Overweight or obese participants sleep 0.50 hours less than those with normal BMI. 
+
+**Heart Rate:** Each additional beat per minute in resting heart rate is linked to a 0.04-hour increase in sleep duration.
+

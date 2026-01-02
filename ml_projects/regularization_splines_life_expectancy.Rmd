@@ -1,0 +1,1327 @@
+---
+title: "Model Regularization and Selection; Splines; Interpretation"
+author: "Hajin Jang"
+date: "11/14/2025"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    toc_depth: 6
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+### This analysis uses global country-level data to build and compare regularized regression and spline-based models for predicting high infant mortality and life expectancy, with an emphasis on variable selection, nonlinear effects, and predictive performance.
+
+
+## About the data
+
+The analysis is based on the LifeExpectancy.csv dataset, which contains repeated country-level observations from 2000 to 2015 for 179 countries. The dataset includes demographic, health, and socioeconomic indicators such as infant mortality, BMI, HIV incidence, GDP per capita, schooling, child thinness, measles incidence, region, and economic development status, with life expectancy as the primary continuous outcome. For different modeling tasks, the data were subset by year, transformed to create a binary infant-mortality outcome (infant deaths ≥30), and split into training, validation, and testing sets. These data were then used to evaluate Ridge and LASSO models for classification and generalized additive models with splines for nonlinear prediction of life expectancy. 
+
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(splines)
+library(caret) #confusionMatrix
+library(ISLR2)
+library(gam)
+library(tidyverse)
+library(glmnet)
+library(boot)
+library(vcd) # for mosaic plots
+library(leaps)
+
+RNGkind(kind = NULL, normal.kind = NULL, sample.kind = NULL)
+set.seed(2345, sample.kind="Rounding")
+sample(1:10,5)
+
+rm(list=ls())
+```
+
+
+
+# Data Cleaning
+
+```{r}
+df <- read.csv("LifeExpectancy.csv")
+
+str(df)
+head(df)
+dim(df)
+
+# Check for missing values
+sum(is.na(df))
+
+# Check the ranges of continuous variables
+ranges <- sapply(df[, sapply(df, is.numeric)], 
+                 function(x) c(min = min(x, na.rm = TRUE),
+                               max = max(x, na.rm = TRUE)))
+t(ranges)
+```
+
+**Comment:**
+Ther are no missing values in the dataset. Based on the observed ranges, all variables appear to fall within realistic and commonly reported values. For example, Year spans 2000–2015, country-level BMI averages fall between 19.8 and 32.1, infant mortality ranges from 1.8 to 138.1 per 1,000 live births, GDP per capita ranges from 148 to 112,418 USD, and life expectancy spans 39.4–83.8 years. These values are all plausible for global country-level data, so none of the variables show abnormal or implausible ranges.
+
+
+## String Variables
+
+```{r getDat}
+# Convert Country, Region, Economy_status_Developed, and Economy_status_Developing as factor variables
+df <- df %>% mutate(
+  Country = as.factor(Country),
+  Region = as.factor(Region),
+  Economy_status_Developed = as.factor(Economy_status_Developed),
+  Economy_status_Developing = as.factor(Economy_status_Developing)
+)
+
+# Check the factor variables
+table(df$Country)
+table(df$Region)
+table(df$Economy_status_Developed)
+table(df$Economy_status_Developing)
+```
+
+**Comment:** I've converted Country, Region, Economy_status_Developed, and Economy_status_Developing as factor variables. They were converted well based on the output.
+
+
+## Continuous Variables
+
+```{r}
+summary(df)
+
+# histograms for numeric columns to visually assess distributions
+df %>%
+  select_if(is.numeric) %>%
+  gather(variable, value) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~ variable, scales = "free", ncol = 2) +
+  labs(title = "Distributions of Continuous Variables")
+```
+
+**Comment:** I checked the continuous variables using summary statistics and visualized their distributions with histograms. No variables appeared incorrectly coded as numeric indicators, and the observed ranges were consistent with expectations. Several variables showed strong right-skewness, but no irregular values suggesting data coding errors were identified.
+
+
+## EDA
+
+```{r }
+summary(df)
+
+# Histogram of numeric variables
+hist(df$Year)
+hist(df$Infant_deaths)
+hist(df$Measles)
+hist(df$BMI)
+hist(df$Incidents_HIV)
+hist(df$GDP_per_capita)
+hist(df$Thinness_five_nine_years)
+hist(df$Schooling)
+hist(df$Life_expectancy)
+
+# List of numeric variables
+num_vars <- c("Infant_deaths", "Measles", "BMI", "Incidents_HIV", "GDP_per_capita", "Thinness_five_nine_years", "Schooling", "Life_expectancy")
+
+# Correlation among numeric variables
+cor_matrix <- cor(df[num_vars], use = "pairwise.complete.obs")
+round(cor_matrix[1:6, 1:6], 2)
+
+# Graphical summaries
+par(mfrow = c(2, 3))
+for (v in num_vars) {
+  hist(df[[v]], main = v, col = "lightblue", border = "white")
+}
+
+# Pairwise scatterplot matrix
+pairs(df[, num_vars[1:5]], main = "Pairwise scatterplot matrix")
+
+
+# Summary of categorical variables
+summary(df[, c("Country", "Region", "Economy_status_Developed", "Economy_status_Developing")])
+
+cat_vars <- df[, sapply(df, is.character) | sapply(df, is.factor)]
+
+lapply(cat_vars, function(x) {
+  list(
+    table = table(x),
+    proportion = prop.table(table(x))
+  )
+})
+
+ggplot(df, aes(x = Country)) +
+  geom_bar() +
+  coord_flip() +   # I tried to avoid label overlap, but the number of countries is so large that the plot still appears very crowded.
+  theme_minimal() +
+  labs(title = "Distribution of Countries",
+       x = "Country",
+       y = "Count")
+
+ggplot(df, aes(x = Region)) +
+  geom_bar() +
+  coord_flip() +
+  theme_minimal()
+
+ggplot(df, aes(x = factor(Economy_status_Developed))) +
+  geom_bar() +
+  theme_minimal()
+
+ggplot(df, aes(x = factor(Economy_status_Developing))) +
+  geom_bar() +
+  theme_minimal()
+```
+
+**Year:** Year ranges from 2000 to 2015 with each year represented fairly evenly across countries, producing a uniform distribution of observations over time.
+
+**Infant_deaths:** Infant_deaths ranges from 1.8 to 138.1, with a median of 19.6 and a mean of 30.4. The strong right-skew reflects that while many countries report relatively low infant mortality, a smaller group experiences very high rates.
+
+**Measles:** Measles shows a bimodal and right-skewed distribution, with many observations around 60–100 but also a long tail at lower values. Measles cases vary from 10 to 99, with a median of 83 and a mean of 77.3. 
+
+**BMI:** BMI ranges from 19.8 to 32.1, with a median of 25.5 and a mean of 25.0. BMI is approximately symmetric and centered around 24–27, indicating that most countries have population-average BMI in the overweight range. There are few extreme values and no apparent outliers.
+
+**Incidents_HIV:** Incidents_HIV ranges from 0.01 to 21.68, but has a very low median (0.15) and mean (0.89), showing a highly right-skewed pattern dominated by near-zero values. A small number of countries experience disproportionately high HIV incidence.
+
+**GDP_per_capita:** GDP_per_capita spans a very wide range from 148 to 112,418, with a median of 4,217 and a mean of 11,541. The severe right skew reflects large global economic disparities, with a few high-income countries driving the mean upward.
+
+**Thinness_five_nine_years:** Thinness_five_nine_years ranges from 0.1 to 28.6, with a median of 3.4 and mean of 4.9. The distribution is right-skewed, indicating that most countries have low thinness rates (falling between 0 and 10%) while a smaller subset shows much higher prevalence.
+
+**Schooling:** Schooling ranges from 1.1 to 14.1 years (slightly right-skewed), with a median of 7.8 and mean of 7.63. The values are broadly distributed, reflecting substantial variation in educational attainment across countries.
+
+**Life_expectancy:** Life_expectancy ranges from 39.4 to 83.8 years, with a median of 71.4 and a mean of 68.9. The distribution is slightly left-skewed, with many countries concentrated in the 65–75 year range.
+
+**Country:** The Country variable contains 179 distinct countries, and each country contributes repeated observations over time. For example, many countries appear 16 times in the dataset, leading to a wide spread of frequencies across levels.
+
+**Region:** The Region variable categorizes countries into nine global areas. Africa accounts for the largest share with 816 records, followed by Asia and the European Union with 432 each, and Central America/Caribbean with 304 entries. These counts show that regional representation is uneven across the dataset.
+
+**Economy_status_Developed:** This binary variable identifies whether an observation is from a developed economy. A total of 592 observations are marked as developed, while the remaining 2,272 are coded as non-developed, indicating that developed economies make up only a small portion of the data.
+
+**Economy_status_Developing:** This indicator variable designates whether an observation belongs to a developing economy. Because it is defined as the complement of the “Developed” variable, the counts invert accordingly: 2,272 observations are coded as developing and 592 as non-developing. This aligns with the overall structure of the dataset, in which developing countries are more prevalent.
+
+
+
+# Model Regularization and Selection
+
+## Data Manipulation
+
+```{r }
+# Create new variable indicating if Infant Deaths >= 30
+df <- df %>%
+  mutate(InfantDeaths_over30 = ifelse(Infant_deaths >= 30, 1, 0))
+
+# Check result
+table(df$InfantDeaths_over30)
+
+
+# Restrict to only year 2010
+df_2010 <- df %>%
+  filter(Year == 2010)
+
+# Check result
+summary(df_2010$Year)
+
+
+# Create a subset excluding the specified variables
+df_problem1 <- df_2010 %>%
+  select(-Country, -Year, -Life_expectancy, -Infant_deaths)
+
+# Check structure
+str(df_problem1)
+```
+
+
+## Training Validation Testing Sets
+
+```{r }
+# training+validation = 75% vs. testing = 25%
+set.seed(123)
+trainval <- createDataPartition(y=df_problem1$InfantDeaths_over30, p=0.75, list=FALSE)
+
+dftrval <- df_problem1[trainval,]
+dftest <- df_problem1[-trainval,]
+
+# training = 50% vs. Validation = 25%
+set.seed(123)
+train <- createDataPartition(y=dftrval$InfantDeaths_over30, p=2/3, list=FALSE)
+dftr <- dftrval[train,]
+dfval <- dftrval[-train,]
+
+# Verify the data
+dim(df); dim(dftrval); dim(dftest); dim(dftr); dim(dfval)
+```
+
+
+## EDA
+
+### EDA - Continuous
+
+```{r }
+# Check outcome variable
+table(df_problem1$InfantDeaths_over30)
+prop.table(table(df_problem1$InfantDeaths_over30))
+
+# Identify numeric variables
+num_vars <- df_problem1 %>% select_if(is.numeric) %>% select(-InfantDeaths_over30)
+
+# Numeric summary by group
+df_problem1 %>%
+  group_by(InfantDeaths_over30) %>%
+  summarise(across(where(is.numeric), 
+                   list(mean = mean, sd = sd, median = median), 
+                   .names = "{.col}_{.fn}"))
+
+# Boxplot
+num_var_names <- names(num_vars)
+
+for (v in num_var_names) {
+  print(
+    ggplot(df_problem1, aes(x = as.factor(InfantDeaths_over30), y = .data[[v]], fill = as.factor(InfantDeaths_over30))) +
+      geom_boxplot() +
+      labs(x = "Infant Deaths ≥ 30", y = v, title = paste("Boxplot of", v, "by Outcome")) +
+      theme_minimal() +
+      scale_fill_manual(values = c("#56B4E9", "#E69F00"))
+  )
+}
+```
+
+**Measles:** Countries with infant deaths >=30 tend to have lower measles values (median 64 vs. 91), and the boxplot shows a downward shift in the distribution. This suggests that higher infant mortality is associated with lower measles reporting rates or differing surveillance patterns.
+
+**BMI:** BMI levels are lower in the >=30 infant death group (median 23.2 vs. 26.1), and the two boxplots barely overlap. This indicates that countries with higher infant mortality generally have lower population BMI.
+
+**Incidents_HIV:** HIV incidence is markedly higher in countries with infant deaths >=30 (median ~1.1 vs. ~0.02), and the distribution is heavily right-skewed in this group. This pattern suggests that HIV burden is greater in settings where infant mortality is high.
+
+**GDP_per_capita:** GDP per capita is dramatically lower in the high-infant-death group (median around 1,300 vs. 8,200), and the boxplot shows little overlap between groups. This strong contrast suggests that poorer countries experience far higher infant mortality.
+
+**Thinness_five_nine_years:** Child thinness is substantially higher in the >=30 group (median ~8.1 vs. ~2.6), with the boxplot showing a clear upward shift. This indicates that undernutrition among children is strongly associated with higher infant deaths.
+
+**Schooling:** Average years of schooling are much lower among countries with >=30 infant deaths (median ~4.2 vs. ~9.7), and the distributions are distinctly separated. This implies that lower educational attainment is strongly correlated with higher infant mortality.
+
+
+### EDA - Categorical
+
+```{r eda3}
+# Identify categorical variables
+cat_vars <- df_problem1 %>% select(where(is.factor))
+
+# Frequency tables by outcome
+for (v in names(cat_vars)) {
+  print(v)
+  print(table(df_problem1[[v]], df_problem1$InfantDeaths_over30))
+  print(prop.table(table(df_problem1[[v]], df_problem1$InfantDeaths_over30), margin = 2))
+}
+```
+
+**Region:** Africa accounts for most observations with infant deaths >=30 (43 out of 62), while regions such as Europe, North America, and Rest of Europe contribute none. This indicates that high infant mortality is geographically concentrated, especially in Africa and parts of Asia.
+
+**Economy_status_Developed:** All observations classified as developed economies fall in the <30 infant deaths group (37 vs. 0), showing that no developed country in the dataset experienced infant deaths >=30. This highlights a strong separation between developed status and high infant mortality.
+
+**Economy_status_Developing:** The pattern reverses for developing economies: 62 of the 62 high–infant-death observations come from developing countries. This reinforces the relationship between lower economic development and elevated infant mortality.
+
+
+
+## Model Building
+
+### Ridge: Cross validation, lambda, graphics
+
+```{r }
+# Train+validation -> x, y
+x_trval <- model.matrix(InfantDeaths_over30 ~ ., data = dftrval)[, -1]
+y_trval <- dftrval$InfantDeaths_over30  
+
+set.seed(123)
+
+
+# Lambda grid
+grid <- c(10^seq(4, -2, length = 99), 0)
+# Print
+grid
+
+# Cross-validation to find optimal lambda
+ridge_cv <- cv.glmnet(x = x_trval, y = y_trval, family = "binomial", lambda = grid, alpha = 0)
+names(ridge_cv)
+
+# Plots
+plot(ridge_cv)
+title("Ridge CV - binomial", line = 2.5)
+
+# Two optimal lambdas
+ridge_lambda_min  <- ridge_cv$lambda.min
+ridge_lambda_min
+
+-log(ridge_lambda_min)
+
+ridge_lambda_1se  <- ridge_cv$lambda.1se
+ridge_lambda_1se
+
+-log(ridge_lambda_1se)
+
+ridge_cv$cvm
+ridge_cv$index
+ridge_cv$cvm[ridge_cv$index]
+
+coef(ridge_cv, c(ridge_lambda_min, ridge_lambda_1se))
+
+ridge_fit <- glmnet(x_trval, y_trval,
+                    family = "binomial",
+                    alpha = 0,
+                    lambda = grid)
+
+plot(ridge_fit, xvar = "lambda")
+title("Ridge coefficient paths", line = 2.5)
+```
+
+**Comment:**
+Using cross-validated Ridge regression on the combined training/validation set, the model identified λ_min = 0.0153 as the tuning parameter that minimizes the binomial deviance, with a corresponding deviance of approximately 0.48. The more conservative λ_1se = 0.2559 produced a slightly higher deviance (~0.62) but yields a simpler and more regularized model.
+
+The cross-validation plot showed a clear decrease in deviance as penalization weakens (moving toward smaller λ values), after which the curve flattens, indicating diminishing returns in model improvement.The coefficient-path plot demonstrated the characteristic Ridge pattern where all coefficients smoothly shrunk toward zero as λ increases, without any coefficients dropping exactly to zero.
+
+**Overall,** the Ridge model suggested that variables such as GDP per capita, schooling, regional indicators, and HIV incidence contributed meaningfully to predicting whether infant deaths exceed 30, though effect sizes remained heavily regularized due to the penalty.
+
+
+### Ridge: coefficient table
+
+```{r }
+# Create a logistic baseline model
+logit_std <- glm(InfantDeaths_over30 ~ ., data = dftrval, family = binomial)
+
+logit_sum <- summary(logit_std)$coefficients
+
+# Extract coefficients at optimal lambda
+ridge_coef <- coef(ridge_cv, s = "lambda.min")
+ridge_coef
+# Convert sparse matrix to vector
+ridge_coef_vec <- as.numeric(ridge_coef)
+names(ridge_coef_vec) <- rownames(ridge_coef)
+
+# Combine both into a single data frame
+coef_table_ridge <- data.frame(
+  term = rownames(logit_sum),
+  Estimate_logit = logit_sum[, "Estimate"],
+  StdError_logit = logit_sum[, "Std. Error"],
+  zvalue_logit   = logit_sum[, "z value"],
+  pvalue_logit   = logit_sum[, "Pr(>|z|)"],
+  Ridge_coef     = ridge_coef_vec[rownames(logit_sum)]
+)
+
+coef_table_ridge
+
+coef_table_ridge %>%
+  filter(term != "(Intercept)") %>%
+  arrange(desc(abs(Ridge_coef)))
+```
+
+**Comment:**
+Using the logistic regression coefficients as a reference, I printed a coefficient table that also includes the Ridge regression coefficients evaluated at the optimal λ (lambda.min = 0.0153). 
+
+When ranking predictors by the absolute value of the Ridge coefficients, the largest coefficients were observed for regional indicators, particularly Central America and Caribbean, Middle East, Rest of Europe, and Oceania. This could mean that geographic factor plays a major role in distinguishing countries with >=30 infant deaths. Economic development status (Developed vs. Developing), BMI, and HIV incidence also showed relatively large Ridge coefficients. However, GDP per capita, Measles, and Thinness (5-9 years) had coefficients very close to 0 and appeared less important after regularization.
+
+
+### LASSO (Lambda and graphics)
+
+```{r Lasso}
+set.seed(123)
+
+# Lambda grid
+grid <- c(10^seq(4, -2, length = 99), 0)
+# Print
+grid
+
+# Cross-validation to find optimal lambda
+lasso_cv <- cv.glmnet(x = x_trval, y = y_trval, family = "binomial", lambda = grid, alpha = 1)
+names(lasso_cv)
+dim(coef(lasso_cv))
+
+# Plots
+plot(lasso_cv)
+title("LASSO CV - binomial", line = 2.5)
+
+# Two optimal lambdas
+lasso_lambda_min <- lasso_cv$lambda.min
+lasso_lambda_min
+-log(lasso_lambda_min)
+
+lasso_lambda_1se <- lasso_cv$lambda.1se
+lasso_lambda_1se
+-log(lasso_lambda_1se)
+
+lasso_cv$cvm
+lasso_cv$index
+lasso_cv$cvm[lasso_cv$index]
+
+coef(lasso_cv, c(lasso_lambda_min, lasso_lambda_1se))
+
+lasso_fit <- glmnet(x_trval, y_trval,
+                    family = "binomial",
+                    alpha = 1,
+                    lambda = grid)
+
+plot(lasso_fit, xvar = "lambda")
+title("Lasso coefficient paths", line = 2.5)
+```
+
+**Comment:**
+Using LASSO with cross validation, the optimal tuning parameter was lambda_min = 0.01, with a more parsimonious choice of lambda_1se = 0.0954. At lambda_min, several predictors have nonzero coefficients, while at lambda_1se only BMI, HIV incidence, and years of schooling remain in the model, indicating that these variables are the most important predictors of having 30 or more infant deaths. The minimum cross validated binomial deviance was about 0.49, and the 1SE had a slightly higher deviance of about 0.66.
+
+
+### LASSO Important Variables
+
+```{r }
+# logistic baseline model summary
+logit_sum <- summary(logit_std)$coefficients
+
+# LASSO coefficients at optimal lambda (lambda.min)
+lasso_coef <- coef(lasso_cv, s = lasso_lambda_min)
+lasso_coef_vec <- as.numeric(lasso_coef)
+names(lasso_coef_vec) <- rownames(lasso_coef)
+
+# logistic + LASSO coefficient table
+coef_table_lasso <- data.frame(
+  term          = rownames(logit_sum),
+  Estimate_logit = logit_sum[, "Estimate"],
+  StdError_logit = logit_sum[, "Std. Error"],
+  zvalue_logit   = logit_sum[, "z value"],
+  pvalue_logit   = logit_sum[, "Pr(>|z|)"],
+  LASSO_coef     = lasso_coef_vec[rownames(logit_sum)]
+)
+
+coef_table_lasso
+
+# Important coefficients
+coef_table_lasso %>%
+  dplyr::filter(term != "(Intercept)", LASSO_coef != 0) %>%
+  dplyr::arrange(dplyr::desc(abs(LASSO_coef)))
+```
+
+**Comment:**
+Using the optimal lambda (λmin = 0.01), the most important variables, based on the magnitude of the LASSO coefficients, were Region (Central America and Caribbean, Middle East, Rest of Europe, Asia, Oceania, South America), Incidents_HIV, BMI, and Schooling. All other predictors were shrunk to zero, indicating limited additional predictive value for infant deaths >=30.
+
+
+### Final Model
+
+```{r }
+### Final model: LASSO with lambda.1se
+
+# Final lambda selection (lasso, lambda.1se)
+lasso_lambda_1se <- lasso_cv$lambda.1se
+
+# test set model matrix and outcome
+x_test <- model.matrix(InfantDeaths_over30 ~ ., data = dftest)[, -1]
+y_test <- dftest$InfantDeaths_over30
+
+# testset probability
+test_prob <- as.numeric(
+  predict(lasso_cv,
+          s    = lasso_lambda_1se,
+          newx = x_test,
+          type = "response")
+)
+
+# test MSE
+test_mse <- mean( (test_prob - y_test)^2 )
+test_mse
+
+# 0.5 cut-off
+test_pred_class <- ifelse(test_prob > 0.5, 1, 0)
+
+# test error
+test_error <- mean(test_pred_class != y_test)
+test_error
+```
+
+```{r }
+plot_df <- data.frame(
+  InfantDeaths_over30 = factor(y_test, levels = c(0, 1)),
+  prob = test_prob
+)
+
+ggplot(plot_df, aes(x = InfantDeaths_over30, y = prob)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, alpha = 0.4) +
+  labs(
+    x = "Observed InfantDeaths_over30",
+    y = "Predicted probability",
+    title = "LASSO (lambda.1se) predicted probabilities on the test set"
+  ) +
+  theme_minimal()
+```
+
+**Comment:**
+I selected the LASSO model with λ.1se as the final model because it provided a more parsimonious model while maintaining similar predictive performance to λ.min. The λ.1se model also reduced the risk of overfitting, which is important given the relatively small sample size in the training and validation sets. The final LASSO model achieved a test MSE of 0.093 and a misclassification error rate of 6.8%, suggesting good predictive accuracy. The predicted probabilities showed clear separation between the two outcome groups. Countries with fewer than 30 infant deaths predicted probabilities mostly below 0.3, whereas those with 30 or more deaths clustered around 0.6–0.8. This indicates that the model captures meaningful differences between groups and fits the data well.
+
+
+## Interpretation
+
+### Explanation for a practitioner
+
+Based on the LASSO model using the λ.1se penalty, several variables emerge as meaningful predictors of whether a country experiences 30 or more infant deaths. Because LASSO shrinks unimportant predictors exactly to zero, the remaining non-zero coefficients represent variables that contribute most strongly to distinguishing high-mortality countries from low-mortality countries.
+
+Countries in regions such as Central America and the Caribbean, the Middle East, and Oceania show substantially different infant-mortality risks compared with the reference region, even after accounting for other variables. These region effects likely reflect broader structural factors such as health-system capacity, access to prenatal care, or public-health infrastructure.
+
+Among continuous predictors, higher HIV incidence and lower BMI and schooling levels were associated with higher odds of having 30 or more infant deaths. These associations are consistent with known public-health patterns: HIV burden can strain health systems and contribute to poorer maternal and neonatal outcomes, while low schooling levels often reflect underlying socioeconomic disadvantage and reduced access to preventive services. Lower average BMI may also indicate nutritional challenges or food insecurity, which can indirectly affect infant health.
+
+Importantly, LASSO focuses on predictive importance rather than statistical significance. Thus, the variables retained by the model should be interpreted as the most informative for distinguishing high-risk countries, not necessarily as causal factors. Nonetheless, the results highlight key structural and health-system indicators that tend to differentiate countries with high infant mortality from those with lower rates. For practitioners, these findings can help prioritize areas for intervention, such as strengthening HIV prevention and treatment programs, improving maternal education, and addressing regional health-system disparities.
+
+
+
+# Splines
+
+## Training Validation Test Sets
+
+```{r }
+# training+validation = 75% vs. testing = 25%
+set.seed(123)
+trainval <- createDataPartition(y=df$Life_expectancy, p=0.75, list=FALSE)
+
+dftrval <- df[trainval,]
+dftest <- df[-trainval,]
+
+# training = 50% vs. Validation = 25%
+set.seed(123)
+train <- createDataPartition(y=dftrval$Life_expectancy, p=2/3, list=FALSE)
+dftr <- dftrval[train,]
+dfval <- dftrval[-train,]
+
+# Verify the data
+dim(df); dim(dftrval); dim(dftest); dim(dftr); dim(dfval)
+```
+
+
+## EDA
+
+```{r}
+# Remove Country
+dftrval <- dftrval %>%
+  select(-Country)
+
+dftest <- dftest %>%
+  select(-Country)
+
+dftr <- dftr %>%
+  select(-Country)
+
+dfval <- dfval %>%
+  select(-Country)
+
+# Check structure
+str(dftrval)
+```
+
+### Continuous variables
+
+```{r }
+library(dplyr)
+library(splines)
+library(boot)
+
+# 1) smoothing spline + MSE
+# 2) natural spline (# of knots as CV) + MSE
+# 3) train data scatter plot + two lines
+
+fit_plot_splines <- function(xvar, df_train, df_val) {
+  # x, y
+  x_train <- df_train[[xvar]]
+  y_train <- df_train$Life_expectancy
+  x_val   <- df_val[[xvar]]
+  y_val   <- df_val$Life_expectancy
+  
+  ## 1. smoothing spline (df: cv=TRUE)
+  ss_fit <- smooth.spline(x = x_train, y = y_train, cv = TRUE)
+  ss_df  <- ss_fit$df
+  
+  # MSE
+  pred_ss_val <- predict(ss_fit, x = x_val)$y
+  MSE_ss <- mean((y_val - pred_ss_val)^2)
+  
+  ## 2. natural spline (# of knots as CV)
+  cand_knots <- 3:8                     
+  cv_mse <- rep(NA, length(cand_knots))
+  
+  df_train_tmp <- df_train %>%
+    mutate(x_tmp = .data[[xvar]])
+  
+  for (i in seq_along(cand_knots)) {
+    k <- cand_knots[i]
+    # equally spaced quantiles: set interior knots
+    probs   <- seq(0, 1, length.out = k + 2)
+    knots_i <- quantile(x_train, probs = probs)[-c(1, k + 2)]
+    
+    fit_tmp <- glm(Life_expectancy ~ ns(x_tmp, knots = knots_i),
+                   data = df_train_tmp)
+    
+    cv_res <- cv.glm(df_train_tmp, fit_tmp, K = 10)
+    cv_mse[i] <- cv_res$delta[1]
+  }
+  
+  best_k <- cand_knots[which.min(cv_mse)]
+  probs_best   <- seq(0, 1, length.out = best_k + 2)
+  best_knots   <- quantile(x_train, probs = probs_best)[-c(1, best_k + 2)]
+  
+  ns_fit <- lm(Life_expectancy ~ ns(x_tmp, knots = best_knots),
+               data = df_train_tmp)
+  
+  df_val_tmp <- df_val %>%
+    mutate(x_tmp = .data[[xvar]])
+  pred_ns_val <- predict(ns_fit, newdata = df_val_tmp)
+  MSE_ns <- mean((y_val - pred_ns_val)^2)
+  
+  ## 3. Plots (training data)
+  x_grid <- seq(min(x_train), max(x_train), length.out = 100)
+  ss_grid <- predict(ss_fit, x_grid)$y
+  
+  grid_df <- data.frame(x_tmp = x_grid)
+  ns_grid <- predict(ns_fit, newdata = grid_df)
+  
+  plot(x_train, y_train,
+       xlab = xvar,
+       ylab = "Life_expectancy",
+       main = paste("Life_expectancy vs", xvar))
+  lines(x_grid, ss_grid, col = "blue", lwd = 2)
+  lines(x_grid, ns_grid, col = "red",  lwd = 2)
+  legend("topleft",
+         legend = c(
+           paste0("Smoothing spline (df = ", round(ss_df, 1), ")"),
+           paste0("Natural spline (knots = ", best_k, ")")
+         ),
+         col = c("blue", "red"),
+         lty = 1, lwd = 2, bty = "n")
+  
+  # Values for the table
+  out <- list(
+    var       = xvar,
+    df_ss     = ss_df,
+    MSE_ss    = MSE_ss,
+    knots_ns  = best_k,
+    MSE_ns    = MSE_ns
+  )
+  return(out)
+}
+```
+
+
+#### Year
+
+```{r }
+res_year <- fit_plot_splines("Year", dftr, dfval)
+res_year
+```
+
+#### Infant Deaths
+
+```{r }
+res_infant <- fit_plot_splines("Infant_deaths", dftr, dfval)
+res_infant
+```
+
+#### GDP per capita
+
+```{r }
+res_gdp <- fit_plot_splines("GDP_per_capita", dftr, dfval)
+res_gdp
+```
+
+#### Measles
+
+```{r }
+res_measles <- fit_plot_splines("Measles", dftr, dfval)
+res_measles
+```
+
+#### BMI
+
+```{r }
+res_bmi <- fit_plot_splines("BMI", dftr, dfval)
+res_bmi
+```
+
+#### HIV/AIDS
+
+```{r }
+res_hiv <- fit_plot_splines("Incidents_HIV", dftr, dfval)
+res_hiv
+```
+
+#### Schooling
+
+```{r }
+res_school <- fit_plot_splines("Schooling", dftr, dfval)
+res_school
+```
+
+#### Thinness 5-9 years
+
+```{r }
+res_thin <- fit_plot_splines("Thinness_five_nine_years", dftr, dfval)
+res_thin
+```
+
+#### Null (Intercept) Model
+
+```{r }
+# Null model: intercept only
+null_fit <- lm(Life_expectancy ~ 1, data = dftr)
+
+# MSE
+null_pred_val <- predict(null_fit, newdata = dfval)
+MSE_null <- mean((dfval$Life_expectancy - null_pred_val)^2)
+
+MSE_null
+```
+
+
++------------+-----------------+----------+----------+----------+-------------------+
+| Variable   | MSE from        | S        | MSE from | \# knots | Better            |
+| Name       | Smoothing       | moothing | ns()     | for ns() | parameterization? |
+|            | Spline          | Spline   |          |          |                   |
+|            |                 | (SS) DF  |          |          |                   |
++============+=================+==========+==========+==========+===================+
+| Intercept  | MSE intercept   |          | NULL     |          |                   |
+| only       | only            |          | MSE=87.3 |          |                   |
++------------+-----------------+----------+----------+----------+-------------------+
+| Year       | 84.6            | df= 2.0  | 85.3     | ns() \#  | SS                |
+|            |                 |          |          | knot= 5  |                   |
++------------+-----------------+----------+----------+----------+-------------------+
+| Infant_    | 10.6            | df= 22.7 | 10.5     | ns() \#  | NS                |
+| deaths     |                 |          |          | knot= 8  |                   |
++------------+-----------------+----------+----------+----------+-------------------+
+| GDP_per_   | 29.6            | df= 27.1 | 29.5     | ns() \#  | NS                |
+| capita     |                 |          |          | knot= 4  |                   |
++------------+-----------------+----------+----------+----------+-------------------+
+| Measles    | 43.5            | df= 21.7 | 49.4     | ns() \#  | SS                |
+|            |                 |          |          | knot= 8  |                   |
++------------+-----------------+----------+----------+----------+-------------------+
+| BMI        | 43.0            | df= 29.0 | 43.9     | ns() \#  | SS                |
+|            |                 |          |          | knot= 8  |                   |
++------------+-----------------+----------+----------+----------+-------------------+
+| Incidents_ | 40.8            | df= 9.4  | 38.8     | ns() \#  | NS                |
+| HIV        |                 |          |          | knot= 8  |                   |
++------------+-----------------+----------+----------+----------+-------------------+
+| Scholling  | 37.7            | df= 40.5 | 37.3     | ns() \#  | NS                |
+|            |                 |          |          | knot= 8  |                   |
++------------+-----------------+----------+----------+----------+-------------------+
+| Thinness_  | 46.7            | df= 34.6 | 50.2     | ns() \#  | SS                |
+| five_nine_ |                 |          |          | knot= 8  |                   |
+| years      |                 |          |          |          |                   |
++------------+-----------------+----------+----------+----------+-------------------+
+
+
+
+### Categorical variables 
+
+| Variable Name   |    MSE    |
+|:---------------:|:---------:|
+|   Region        | 32.76     |
+| Econ_Developed  | 64.43     |
+| Econ_Developing | 64.43     |
+
+```{r }
+cat_vars <- names(dftr)[sapply(dftr, function(x) is.factor(x) | is.character(x))]
+cat_vars <- setdiff(cat_vars, "Life_expectancy")
+
+cat_vars
+
+# Boxplots
+for (v in cat_vars) {
+  boxplot(dftr$Life_expectancy ~ dftr[[v]],
+          main = paste("Life_expectancy by", v),
+          xlab = v,
+          ylab = "Life_expectancy")
+}
+
+# regression analysis + validation MSE
+mse_cat <- data.frame(
+  Variable = cat_vars,
+  MSE      = NA_real_,
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_along(cat_vars)) {
+  v <- cat_vars[i]
+  
+  # Life_expectancy ~ categorical variable
+  fml <- as.formula(paste("Life_expectancy ~", v))
+  
+  fit <- lm(fml, data = dftr)
+  
+  pred_val <- predict(fit, newdata = dfval)
+  
+  mse_cat$MSE[i] <- mean((dfval$Life_expectancy - pred_val)^2)
+}
+
+mse_cat
+```
+
+
+### EDA Important Variables
+
+Based on the univariate analyses, **Infant_deaths** showed the strongest relationship with Life_expectancy. This variable produced by far the lowest prediction errors, with MSE values of 10.54-10.58, indicating a very strong inverse association between infant death and life expectancy.
+
+**GDP_per_capita** also showed relatively strong univariate relationship. It had an MSE of 29.46–29.63, making it the second strongest continuous predictor. 
+
+**Region** was the third strongest predictor with a validation MSE of 32.76.
+
+**Schooling** (MSE 37.34–37.69) and **Incidents_HIV** (MSE 38.76–40.85) showed moderate predictive strength as well.
+
+**Overall,** Infant_deaths is the strongest univariate predictor of Life_expectancy, followed by GDP_per_capita. Region, Schooling, Incidents_HIV, and Region also show meaningful univariate associations.
+
+
+
+## Full Model 
+
+```{r}
+library(gam)
+library(splines)
+
+# Full model using best spline choices for each predictor
+full_model <- gam(
+  Life_expectancy ~ 
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    s(Measles, df = 8) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftr
+)
+
+summary(full_model)
+
+# predictions on validation set
+pred_val <- predict(full_model, newdata = dfval)
+
+# validation MSE
+MSE_full <- mean((dfval$Life_expectancy - pred_val)^2)
+
+MSE_full
+```
+
+**Comment:**
+I fitted a GAM on the training set using the best-performing spline parameterizations from the univariate analyses (NS for Infant_deaths, GDP_per_capita, Incidents_HIV, and Schooling; SS for Year, Measles, BMI, and Thinness; and Region as a factor). The model significantly reduced deviance (from 127,300 to 4,760) and showed strong nonparametric effects for several predictors. The validation MSE was 3.85, indicating that the multivariable spline model provides substantial improvement in predictive accuracy over the univariate models.
+
+
+
+## Refine the model
+
+### Pseudo-backward stepwise selection 
+
+### 1. Check Year
+
+```{r }
+# Full model validation MSE -> base MSE
+best_MSE <- MSE_full   
+best_MSE
+
+# Model without Year
+mod_noYear <- gam(
+  Life_expectancy ~ 
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    s(Measles, df = 8) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftr
+)
+
+# validation MSE
+pred_noYear <- predict(mod_noYear, newdata = dfval)
+MSE_noYear <- mean((dfval$Life_expectancy - pred_noYear)^2)
+MSE_noYear
+```
+
+**Comment:** MSE changed from 3.847604 to 3.933785. Removing Year worsened prediction error, so Year was kept in the model.
+
+**Best MSE** remains 3.847604.
+
+
+### 2. Check Infant_deaths
+
+```{r }
+# Best MSE carried over from previous step
+best_MSE
+
+# Model without Infant_deaths
+mod_noInfant <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(GDP_per_capita, df = 6) +
+    s(Measles, df = 8) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftr
+)
+
+# validation MSE
+pred_noInfant <- predict(mod_noInfant, newdata = dfval)
+MSE_noInfant <- mean((dfval$Life_expectancy - pred_noInfant)^2)
+MSE_noInfant
+```
+
+**Comment:** MSE changed from 3.847604 to 9.168095. Removing Infant_deaths worsened prediction error, so Infant_deaths was kept in the model.
+
+**Best MSE** remains 3.847604.
+
+
+### 3. Check GDP_per_capita
+
+```{r }
+# Best MSE carried over from previous step
+best_MSE
+
+# Model without GDP_per_capita
+mod_noGDP <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    s(Measles, df = 8) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftr
+)
+
+# validation MSE
+pred_noGDP <- predict(mod_noGDP, newdata = dfval)
+MSE_noGDP <- mean((dfval$Life_expectancy - pred_noGDP)^2)
+MSE_noGDP
+```
+
+**Comment:** MSE changed from 3.847604 to 4.036478. Removing GDP_per_capita worsened prediction error, so GDP_per_capita was kept in the model.
+
+**Best MSE** remains 3.847604.
+
+
+### 4. Check Measles
+
+```{r }
+# Best MSE carried over from previous step
+best_MSE
+
+# Model without Measles
+mod_noMeasles <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftr
+)
+
+# validation MSE
+pred_noMeasles <- predict(mod_noMeasles, newdata = dfval)
+MSE_noMeasles <- mean((dfval$Life_expectancy - pred_noMeasles)^2)
+MSE_noMeasles
+```
+
+**Comment:** MSE changed from 3.847604 to 3.816505. Removing Measles improved prediction error, so Measles was removed from the model.
+
+**Best MSE** is now 3.816505.
+
+
+### 5. Check BMI
+
+```{r }
+# Best MSE updated
+best_MSE <- MSE_noMeasles
+best_MSE
+
+# Model without BMI
+mod_noBMI <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftr
+)
+
+# validation MSE
+pred_noBMI <- predict(mod_noBMI, newdata = dfval)
+MSE_noBMI <- mean((dfval$Life_expectancy - pred_noBMI)^2)
+MSE_noBMI
+```
+
+**Comment:** MSE changed from 3.816505 to 3.934864. Removing BMI worsened prediction error, so BMI was kept in the model.
+
+**Best MSE** remains 3.816505.
+
+
+### 6. Check Incidents_HIV
+
+```{r }
+# Best MSE carried over from previous step
+best_MSE <- MSE_noMeasles   # 3.816505
+best_MSE
+
+# Model without Incidents_HIV
+mod_noHIV <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    s(BMI, df = 8) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftr
+)
+
+# validation MSE
+pred_noHIV <- predict(mod_noHIV, newdata = dfval)
+MSE_noHIV <- mean((dfval$Life_expectancy - pred_noHIV)^2)
+MSE_noHIV
+```
+
+**Comment:** MSE changed from 3.816505 to 7.165852. Removing Incidents_HIV worsened prediction error, so Incidents_HIV was kept in the model.
+
+**Best MSE** remains 3.816505.
+
+
+### 7. Check Schooling
+
+```{r }
+# Best MSE carried over from previous step
+best_MSE <- MSE_noMeasles   # 3.816505
+best_MSE
+
+# Model without Schooling
+mod_noSchool <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftr
+)
+
+# validation MSE
+pred_noSchool <- predict(mod_noSchool, newdata = dfval)
+MSE_noSchool <- mean((dfval$Life_expectancy - pred_noSchool)^2)
+MSE_noSchool
+```
+
+**Comment:** MSE changed from 3.816505 to 4.049667. Removing Schooling worsened prediction error, so Schooling was kept in the model.
+
+**Best MSE** remains 3.847604.
+
+
+### 8. Check Thinness_five_nine_years
+
+```{r }
+# Best MSE carried over from previous step
+best_MSE <- MSE_noMeasles   # 3.816505
+best_MSE
+
+# Model without Thinness_five_nine_years
+mod_noThin <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    Region,
+  data = dftr
+)
+
+# validation MSE
+pred_noThin <- predict(mod_noThin, newdata = dfval)
+MSE_noThin <- mean((dfval$Life_expectancy - pred_noThin)^2)
+MSE_noThin
+```
+
+**Comment:** MSE changed from 3.816505 to 3.969929. Removing Thinness_five_nine_years worsened prediction error, so Thinness_five_nine_years was kept in the model.
+
+**Best MSE** remains 3.816505.
+
+
+### 9. Check Region
+
+```{r }
+# Best MSE carried over from previous step
+best_MSE <- MSE_noMeasles   # 3.816505
+best_MSE
+
+# Model without Region
+mod_noRegion <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8),
+  data = dftr
+)
+
+# validation MSE
+pred_noRegion <- predict(mod_noRegion, newdata = dfval)
+MSE_noRegion <- mean((dfval$Life_expectancy - pred_noRegion)^2)
+MSE_noRegion
+```
+
+**Comment:** MSE changed from 3.816505 to 4.345767. Removing Region worsened prediction error, so Region was kept in the model.
+
+**Best MSE** remains 3.816505.
+
+
+```{r}
+# Summarize MSE for each model
+MSE_full
+MSE_noYear
+MSE_noInfant
+MSE_noGDP
+MSE_noMeasles
+MSE_noBMI
+MSE_noHIV
+MSE_noSchool
+MSE_noThin
+MSE_noRegion
+```
+
+
+### Model Building Table
+
++---------------+-------------------------------+--------------+----------------------+---------------+
+| Best MSE      | Model (Remove Variable)       | Validation   | Decision             | Best MSE      |
+| at Start      |                               | Set MSE      |                      | at End        |
++===============+===============================+==============+======================+===============+
+| 3.847604      | Full Multivariable Model      | 3.847604     | Base MSE             | 3.847604      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+| 3.847604      | Remove Year                   | 3.933785     | MSE ↑  → KEEP        | 3.847604      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+| 3.847604      | Remove Infant_deaths          | 9.168095     | MSE ↑  → KEEP        | 3.847604      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+| 3.847604      | Remove GDP_per_capita         | 4.036478     | MSE ↑  → KEEP        | 3.847604      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+| 3.847604      | Remove Measles                | 3.816505     | MSE ↓  → REMOVE      | 3.816505      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+| 3.816505      | Remove BMI                    | 3.934864     | MSE ↑  → KEEP        | 3.816505      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+| 3.816505      | Remove Incidents_HIV          | 7.165852     | MSE ↑  → KEEP        | 3.816505      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+| 3.816505      | Remove Schooling              | 4.049667     | MSE ↑  → KEEP        | 3.816505      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+| 3.816505      | Remove Thinness_5_9_years     | 3.969929     | MSE ↑  → KEEP        | 3.816505      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+| 3.816505      | Remove Region                 | 4.345767     | MSE ↑  → KEEP        | 3.816505      |
++---------------+-------------------------------+--------------+----------------------+---------------+
+
+
+### Important Variables
+
+Based on the univariate spline analyses, Infant_deaths showed the strongest relationship with Life_expectancy, producing the lowest validation MSE (approximately 10.54-10.58). This indicates a very strong inverse association, where higher infant deaths predict substantially lower life expectancy.
+
+GDP_per_capita also demonstrated a strong univariate association, with validation MSE around 29.46–29.63, making it the second most predictive continuous variable.
+
+Among the categorical variables, Region was the most informative predictor, with a validation MSE of 32.76, outperforming both developed- and developing-country indicators.
+
+Other continuous predictors such as Schooling, Incidents_HIV, and BMI had moderate univariate relationships (MSE values between 37-43).
+
+Overall, the variables most strongly related to Life_expectancy on a univariate basis are Infant_deaths, GDP_per_capita, and Region.
+
+
+
+## Final Model/Interpretation
+
+```{r }
+# Final model includes all variables (Year, Infant_deaths, GDP_per_capita, BMI, Incidents_HIV, Schooling, Thinness_five_nine_years, and Region) except Measles.
+final_model <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftr
+)
+
+summary(final_model)
+```
+
+
+### Final Model
+
+```{r }
+# Final model fitted on training + validation (dftrval)
+final_model <- gam(
+  Life_expectancy ~
+    s(Year, df = 2) +
+    ns(Infant_deaths, df = 10) +
+    ns(GDP_per_capita, df = 6) +
+    s(BMI, df = 8) +
+    ns(Incidents_HIV, df = 10) +
+    ns(Schooling, df = 10) +
+    s(Thinness_five_nine_years, df = 8) +
+    Region,
+  data = dftrval
+)
+
+summary(final_model)
+```
+
+
+### Final MSE
+
+```{r }
+# Testing MSE
+
+# Predict using the final model on the testing set
+pred_test <- predict(final_model, newdata = dftest)
+
+# Compute test MSE
+MSE_test <- mean((dftest$Life_expectancy - pred_test)^2)
+MSE_test
+
+
+# Predicted vs Observed Plot
+plot(
+  dftest$Life_expectancy, pred_test,
+  xlab = "Observed Life Expectancy",
+  ylab = "Predicted Life Expectancy",
+  main = "Predicted vs Observed Life Expectancy (Testing Set)",
+  pch = 19, col = "darkgray"
+)
+
+# Add x=y reference line
+abline(a = 0, b = 1, col = "red", lwd = 2)
+```
+
+**Comment:**
+The testing MSE for the final model was 3.740605, indicating strong predictive performance on unseen data.
+
+The predicted vs. observed plot shows that the predictions from the final model align closely with the 45-degree reference line. Most points fall tightly around the line across the full range of life expectancy values, suggesting that the model captures the underlying relationship well. While some variability appears at the lower and upper extremes, the overall fit indicates that the model predicts life expectancy accurately for the test data.
+
+
+### Interpretation
+
+Our goal was to build a model that accurately predicts life expectancy based on a country’s demographic, health, and economic characteristics. Using data-driven variable selection and spline-based modeling to capture nonlinear relationships, the final model performed well, achieving a low testing MSE of approximately 3.74.
+
+Across all predictors considered, **infant mortality and GDP per capita** were among the strongest contributors to explaining life expectancy, showing clear nonlinear associations. Schooling, HIV incidence, BMI, and the thinness indicator also provided meaningful predictive information, while geographic region added important categorical structure. Measles incidence was the only variable that did not improve model performance and was removed during backward selection.
+
+**Overall,** the model generalizes well and makes accurate predictions across the full range of life expectancy values, as shown by the close alignment between predicted and observed outcomes in the testing set. This suggests that the included variables collectively capture key population characteristics associated with national life expectancy. For an investigator, this model can serve as a reliable tool for predicting life expectancy and for understanding which factors most strongly influence these predictions.
+
+    

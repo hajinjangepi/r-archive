@@ -1,0 +1,782 @@
+---
+title: "Trees, RF, Multiple Testing, PCA, Hierarchical Clustering"
+date: "12/10/2025"
+Author: "Hajin Jang"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    toc_depth: 6
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tree) #CART 
+library(caret) #confusionMatrix
+library(randomForest)
+library(tidyverse)
+library(skimr)
+library(boot)
+
+RNGkind(kind = NULL, normal.kind = NULL, sample.kind = NULL)
+set.seed(2345, sample.kind="Rounding")
+sample(1:10,5)
+
+rm(list=ls())
+
+start <- Sys.time()
+start
+```
+
+
+
+# Data Cleaning
+
+## Data
+
+```{r}
+df <- read.csv("simulated_diabetes.csv")
+
+str(df)
+head(df)
+dim(df)
+
+# Check for missing values
+sum(is.na(df))
+
+# Check the ranges of continuous variables
+ranges <- sapply(df[, sapply(df, is.numeric)], 
+                 function(x) c(min = min(x, na.rm = TRUE),
+                               max = max(x, na.rm = TRUE)))
+t(ranges)
+```
+
+**Comment:** 
+The dataset contains 5000 observations with no missing values. All continuous variables fall within expected physiological or behavioral ranges, indicating there are no obvious data entry errors or implausible values. The structure and initial rows confirm that variable types were correctly loaded, and the dataset is ready for preprocessing and modeling.
+
+
+## String Variables
+
+```{r}
+# Convert gender, smoking_status, family_history_diabetes, and diagnosed_diabetes as factor variables
+df <- df %>% mutate(
+  gender = as.factor(gender),
+  smoking_status = as.factor(smoking_status),
+  family_history_diabetes = as.factor(family_history_diabetes),
+  diagnosed_diabetes = as.factor(diagnosed_diabetes)
+)
+
+# Check the factor variables
+table(df$gender)
+table(df$smoking_status)
+table(df$family_history_diabetes)
+table(df$diagnosed_diabetes)
+```
+
+**Comment:** 
+String variables were successfully converted to factors, and the resulting category distributions look appropriate. No unexpected or empty categories were detected, so these variables are now properly formatted for modeling. Gender includes a small “Other” category, which may reflect participants who do not identify strictly as male or female and choose to report a nonbinary or alternative gender identity.
+
+
+## Continuous Variables
+
+```{r}
+summary(df)
+
+# histograms for numeric columns to visually assess distributions
+df %>%
+  select_if(is.numeric) %>%
+  gather(variable, value) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~ variable, scales = "free", ncol = 2) +
+  labs(title = "Distributions of Continuous Variables")
+```
+
+**Comment:** 
+I checked the continuous variables using summary statistics and visualized their distributions with histograms. No variables appeared to be incorrectly coded as numeric indicators, and the observed ranges were consistent with what would be expected for an adult population. Several variables, such as physical activity minutes per week, screen time hours per day, and triglycerides, showed noticeable right-skewness, which is typical for behavioral and biomarker data. Other variables, including heart rate and blood pressure, displayed more symmetric distributions. Overall, no unusual or implausible values were detected, and the continuous variables appear clean and ready for analysis.
+
+
+## Training Validation Test Sets
+
+```{r }
+# training+validation = 75% vs. testing = 25%
+set.seed(123)
+trainval <- createDataPartition(y=df$diagnosed_diabetes, p=0.75, list=FALSE)
+
+dftrval <- df[trainval,]
+dftest <- df[-trainval,]
+
+# training = 50% vs. Validation = 25%
+set.seed(123)
+train <- createDataPartition(y=dftrval$diagnosed_diabetes, p=2/3, list=FALSE)
+dftr <- dftrval[train,]
+dfval <- dftrval[-train,]
+
+# Verify the data
+dim(df); dim(dftrval); dim(dftest); dim(dftr); dim(dfval)
+```
+
+
+## EDA
+
+```{r }
+summary(df)
+
+# Histogram of numeric variables
+hist(df$age)
+hist(df$physical_activity_minutes_per_week)
+hist(df$diet_score)
+hist(df$sleep_hours_per_day)
+hist(df$screen_time_hours_per_day)
+hist(df$bmi)
+hist(df$systolic_bp)
+hist(df$diastolic_bp)
+hist(df$heart_rate)
+hist(df$cholesterol_total)
+hist(df$hdl_cholesterol)
+hist(df$ldl_cholesterol)
+hist(df$triglycerides)
+hist(df$hba1c)
+
+# List of numeric variables
+num_vars <- c("age", "physical_activity_minutes_per_week", "diet_score", "sleep_hours_per_day", "screen_time_hours_per_day", "bmi", "systolic_bp", "diastolic_bp", "heart_rate", "cholesterol_total", "hdl_cholesterol", "ldl_cholesterol", "triglycerides", "hba1c")
+
+# Correlation among numeric variables
+cor_matrix <- cor(df[num_vars], use = "pairwise.complete.obs")
+round(cor_matrix[1:6, 1:6], 2)
+
+# Graphical summaries
+par(mfrow = c(2, 3))
+for (v in num_vars) {
+  hist(df[[v]], main = v, col = "lightblue", border = "white")
+}
+
+# Pairwise scatterplot matrix
+pairs(df[, num_vars[1:5]], main = "Pairwise scatterplot matrix")
+```
+
+```{r}
+# Summary of categorical variables
+summary(df[, c("gender", "smoking_status", "family_history_diabetes", "diagnosed_diabetes")])
+
+cat_vars <- df[, sapply(df, is.character) | sapply(df, is.factor)]
+
+lapply(cat_vars, function(x) {
+  list(
+    table = table(x),
+    proportion = prop.table(table(x))
+  )
+})
+
+ggplot(df, aes(x = gender)) +
+  geom_bar() +
+  coord_flip() +  
+  theme_minimal() +
+  labs(title = "Distribution of gender",
+       x = "gender",
+       y = "Count")
+
+ggplot(df, aes(x = smoking_status)) +
+  geom_bar() +
+  coord_flip() +
+  theme_minimal()
+  labs(title = "Distribution of smoking status",
+       x = "smoking_status",
+       y = "Count")
+  
+ggplot(df, aes(x = factor(family_history_diabetes))) +
+  geom_bar() +
+  theme_minimal()
+  labs(title = "Distribution of family history of diabetes",
+       x = "family_history_diabetes",
+       y = "Count")
+  
+ggplot(df, aes(x = factor(diagnosed_diabetes))) +
+  geom_bar() +
+  theme_minimal()
+  labs(title = "Distribution of diagnosed diabetes",
+       x = "diagnosed_diabetes",
+       y = "Count")
+  
+```
+
+**age:** Age ranges from 18 to 90, with a median of 50. The distribution is roughly symmetric and centered in mid-adulthood, indicating broad representation across the adult lifespan.
+
+**physical_activity_minutes_per_week:** Weekly physical activity ranges from 2 to 651 minutes, with a strong right-skew driven by a small number of highly active individuals. Most participants cluster between 50 and 200 minutes per week.
+
+**diet_score:** Diet score ranges from 0 to 10, with a median near 6. The distribution is approximately symmetric, suggesting a balanced spread of dietary quality levels across the sample.
+
+**sleep_hours_per_day:** Sleep hours range from 3 to 10, with a median of 7. The distribution is bell-shaped, indicating most individuals report 6–8 hours per night.
+
+**screen_time_hours_per_day:** Screen time ranges from 0.5 to 15 hours per day and shows right-skewness. While most participants report around 4–7 hours, a smaller group reports much higher use.
+
+**bmi:** BMI ranges from 15.0 to 38.9, with a median of 25.7. The distribution is moderately symmetric and centered in the mid-20s, consistent with a population spanning normal weight to obesity.
+
+**systolic_bp:** Systolic blood pressure ranges from 90 to 167, with a median of 116. The distribution is right-skewed, reflecting the presence of individuals with elevated blood pressure.
+
+**diastolic_bp:** Diastolic blood pressure ranges from 50 to 107, with a median of 75. The distribution is roughly symmetric, centered within the typical normal-to-borderline range.
+
+**heart_rate:** Heart rate ranges from 40 to 99 beats per minute, with a median of 70. The distribution appears symmetric and aligns with expected resting heart rate values.
+
+**cholesterol_total:** Total cholesterol ranges from 100 to 310, with a median of 186. The distribution is slightly right-skewed, with most values falling within standard clinical ranges.
+
+**hdl_cholesterol:** HDL cholesterol ranges from 20 to 96, with a median of 54. Values follow a symmetric distribution centered around typical HDL levels.
+
+**ldl_cholesterol:** LDL cholesterol ranges from 50 to 263, with a median of 102. Although mostly centered in the normal range, the distribution shows a right tail reflecting individuals with elevated LDL.
+
+**triglycerides:** Triglycerides range from 30 to 278, showing right-skewness. Most values fall around 100–150, but a subset of participants contributes to a long upper tail.
+
+**hba1c:** HbA1c ranges from 4.0 to 9.5, with a median of 6.5. The distribution is slightly right-skewed, reflecting a mix of normoglycemic individuals and those with elevated glucose levels.
+
+**gender:** Gender includes three categories: Female (50.6 percent), Male (47.8 percent), and a small Other group (1.6 percent). The distribution is nearly balanced between males and females, with a very small proportion identifying as Other.
+
+**smoking_status:** Smoking status consists of Current (19.3 percent), Former (19.9 percent), and Never smokers (60.8 percent). Most participants report never smoking, while current and former smokers are represented in similar proportions.
+
+**family_history_diabetes:** Family history of diabetes is coded as 0 or 1, with 78.3 percent reporting no family history and 21.7 percent reporting a positive history. This distribution suggests that family history of diabetes is present in a meaningful minority of the sample.
+
+**diagnosed_diabetes:** Diagnosed diabetes is also binary, with 41.3 percent reporting no diagnosis and 58.7 percent reporting having been diagnosed. The relatively high proportion of diagnosed diabetes reflects the simulated dataset’s design to include a substantial number of individuals with diabetes.
+
+
+
+# Tree Based / Random Forest / Logistic Regression / Multiple Testing
+
+## Tree Based Prediction
+
+```{r}    
+# Build tree (exclude hba1c)
+set.seed(123)
+diab.tree <- tree(diagnosed_diabetes ~ . - hba1c, data = dftr)
+
+summary(diab.tree)
+
+# Plot tree
+plot(diab.tree)
+text(diab.tree, pretty = 1, cex = 0.6)
+
+# Predict on validation set
+diab.pred <- predict(diab.tree, newdata = dfval, type = "class")
+
+# Validation accuracy
+conf <- table(Predicted = diab.pred, Actual = dfval$diagnosed_diabetes)
+conf
+val_acc <- sum(diab.pred == dfval$diagnosed_diabetes) / nrow(dfval)
+val_acc
+```
+
+**Comment:**
+The final classification tree contained 3 terminal nodes. The first node represents individuals with no family history of diabetes and age less than 60.5 years, and this node predicts no diagnosed diabetes (class 0). The second node contains individuals with no family history but age 60.5 years or older, and it predicts diagnosed diabetes (class 1). The third node includes all individuals with a positive family history of diabetes, regardless of age, and also predicts diagnosed diabetes (class 1). When applied to the validation set, the tree achieved a classification accuracy of 0.5704, corresponding to approximately 57 percent correctly classified observations.
+
+
+## Random Forest Prediction
+
+```{r}    
+set.seed(123)
+
+# Random forest with mtry = 4
+rf4 <- randomForest(
+  diagnosed_diabetes ~ . - hba1c,
+  data = dftr,
+  mtry = 4,
+  importance = TRUE
+)
+
+# Predict validation set
+pred4 <- predict(rf4, newdata = dfval, type = "class")
+acc4 <- mean(pred4 == dfval$diagnosed_diabetes)
+acc4
+
+# Random forest with mtry = 16
+rf16 <- randomForest(
+  diagnosed_diabetes ~ . - hba1c,
+  data = dftr,
+  mtry = 16,
+  importance = TRUE
+)
+
+# Predict validation set
+pred16 <- predict(rf16, newdata = dfval, type = "class")
+acc16 <- mean(pred16 == dfval$diagnosed_diabetes)
+acc16
+
+# Variable importance plots
+varImpPlot(rf4, main = "Variable Importance (mtry = 4)")
+varImpPlot(rf16, main = "Variable Importance (mtry = 16)")
+
+# Numeric importance values
+importance(rf4)
+importance(rf16)
+```
+
+**Comment:**
+Between the two models, mtry = 4 produced the highest validation accuracy (0.596), slightly outperforming mtry = 16 (0.592). Therefore, mtry = 4 provides the best predictive performance.
+Across both models, the most influential predictors were family history, metabolic, and lifestyle variables. Variables such as family_history_diabetes, physical_activity_minutes_per_week, BMI, age, triglycerides, screen_time_hours_per_day, diet_score, systolic_bp, HDL cholesterol, and total cholesterol consistently showed high importance based on both MeanDecreaseAccuracy and MeanDecreaseGini. The paired importance plots confirm that diabetes diagnosis in this dataset is largely driven by a combination of metabolic health factors and behavioral patterns.
+The predicted validation accuracies were 0.596 for mtry = 4 and 0.592 for mtry = 16. Thus, the random forest with mtry = 4 achieves the best predictive accuracy.
+
+
+## Logistic Regression and Multiple Testing
+```{r}    
+## Full logistic regression (training set)
+glm_full <- glm(
+  diagnosed_diabetes ~ . - hba1c,
+  data   = dftr,
+  family = binomial
+)
+
+summary(glm_full)
+
+## Extract p values (excluding intercept)
+coef_tab <- coef(summary(glm_full))
+pvals    <- coef_tab[-1, "Pr(>|z|)"]        # drop intercept
+varnames <- names(pvals)
+m        <- length(pvals)                   # number of tests
+
+m
+pvals
+```
+
+#### Significant predictors
+
+```{r}
+alpha <- 0.05
+
+sig_unadj <- varnames[pvals < alpha]
+sig_unadj
+```
+
+**Comment:**
+At the unadjusted α = 0.05 level, the significant predictors were age, physical_activity_minutes_per_week, diet_score, family_history_diabetes, bmi, and systolic_bp.
+
+
+#### Significant predictors after controlling FWER with Bonferroni's method
+
+```{r}
+alpha_bonf <- alpha / m   # Bonferroni threshold
+
+alpha_bonf
+sig_bonf <- varnames[pvals < alpha_bonf]
+sig_bonf
+```
+
+**Comment:**
+Using Bonferroni’s method to control the family-wise error rate, the significance threshold becomes α/m = 0.05/18 ≈ 0.00278. Under this more conservative cutoff, only three variables remained statistically significant: age, physical_activity_minutes_per_week, and family_history_diabetes. These predictors had p-values below the Bonferroni-adjusted threshold and therefore showed strong evidence of association with diagnosed diabetes even after controlling for multiple testing.
+
+
+#### Significant predictors after controlling FWER with Holm's method
+
+```{r}
+# Order p values
+ord        <- order(pvals)
+p_sorted   <- pvals[ord]
+vars_sorted <- varnames[ord]
+
+# Holm critical values: alpha/(m - k + 1)
+k_idx  <- seq_along(p_sorted)
+crit_H <- alpha / (m - k_idx + 1)
+
+# Find largest k with p_(k) <- crit_H(k)
+rej_idx <- which(p_sorted <= crit_H)
+
+if (length(rej_idx) == 0) {
+  sig_holm <- character(0)
+} else {
+  k_max   <- max(rej_idx)
+  sig_holm <- vars_sorted[1:k_max]
+}
+
+crit_H
+sig_holm
+```
+
+**Comment:**
+Using Holm’s step-down procedure to control the family-wise error rate, the p-values were first sorted and compared to the sequential Holm critical values α/(m − k + 1). Three variables met the Holm rejection criteria: age, physical_activity_minutes_per_week, and family_history_diabetes. The Holm-adjusted set was identical to the Bonferroni-adjusted set in this dataset. These variables remained significant even after applying Holm’s more powerful FWER correction, indicating strong evidence of association with diagnosed diabetes. 
+
+
+#### Significant predictors after controlling for FDR at the q=0.05 level
+
+```{r}
+q      <- 0.05
+k_idx  <- seq_along(p_sorted)
+crit_BH <- (k_idx / m) * q
+
+rej_idx_BH <- which(p_sorted <= crit_BH)
+
+if (length(rej_idx_BH) == 0) {
+  sig_fdr <- character(0)
+} else {
+  k_max_BH <- max(rej_idx_BH)
+  sig_fdr  <- vars_sorted[1:k_max_BH]
+}
+
+crit_BH
+sig_fdr
+```
+
+**Comment:**
+Applying the Benjamini–Hochberg procedure to control the false discovery rate at q = 0.05, the p-values were ordered and compared to the BH critical vaules (k/m)q. Three variables met the BH rejection criterion and were therefore significant after controlling for FDR: age, physical_activity_minutes_per_week, and family_history_diabetes. As with Holm and Bonferroni, the same three predictors were retained under FDR correction.These variables had sufficiently small p-values relative to their BH thresholds, indicating that they remain statistically significant even when controlling the expected proportion of false discoveries.
+
+
+#### Logistic regressions based on multiple testing results
+
+```{r}
+# a) Unadjusted 0.05
+vars_unadj <- c(
+  "age",
+  "diet_score",
+  "bmi",
+  "physical_activity_minutes_per_week",
+  "family_history_diabetes",  
+  "systolic_bp"
+)
+
+# b) Bonferroni
+vars_bonf <- c(
+  "family_history_diabetes",
+  "physical_activity_minutes_per_week",
+  "age"
+)
+
+# c) Holm 
+vars_holm <- c(
+  "family_history_diabetes",
+  "physical_activity_minutes_per_week",
+  "age"
+)
+
+# d) FDR 
+vars_fdr <- c(
+  "family_history_diabetes",
+  "physical_activity_minutes_per_week",
+  "age"
+)
+
+# Validation error function
+logit_val_error <- function(vars, dftr, dfval, threshold = 0.5) {
+  if (length(vars) == 0) {
+    form <- diagnosed_diabetes ~ 1
+  } else {
+    form <- as.formula(
+      paste("diagnosed_diabetes ~", paste(vars, collapse = " + "))
+    )
+  }
+  
+  fit <- glm(form, data = dftr, family = binomial)
+  
+  p_hat <- predict(fit, newdata = dfval, type = "response")
+  y_hat <- ifelse(p_hat >= threshold, 1, 0)
+  y_true <- ifelse(dfval$diagnosed_diabetes %in% c(1, "1"), 1, 0)
+  
+  acc <- mean(y_hat == y_true)
+  err <- 1 - acc
+  
+  list(model = fit, accuracy = acc, error = err)
+}
+
+# 1) unadjusted model
+res_unadj <- logit_val_error(vars_unadj, dftr, dfval)
+res_unadj$accuracy
+res_unadj$error
+
+# 2) Bonferroni model
+res_bonf <- logit_val_error(vars_bonf, dftr, dfval)
+res_bonf$accuracy
+res_bonf$error
+
+# 3) Holm model
+res_holm <- logit_val_error(vars_holm, dftr, dfval)
+res_holm$accuracy
+res_holm$error
+
+# 4) FDR model
+res_fdr <- logit_val_error(vars_fdr, dftr, dfval)
+res_fdr$accuracy
+res_fdr$error
+```
+
+**Comment:** 
+The unadjusted model at the 0.05 level retained six variables (age, diet_score, bmi, physical_activity_minutes_per_week, family_history_diabetes, and systolic_bp), and this model achieved the highest validation accuracy at 0.6208, corresponding to a validation error of 0.3792. 
+When applying Bonferroni's family-wise error correction, only three variables (age, physical_activity_minutes_per_week, and family_history_diabetes) remained significant, and the reduced model produced a slightly lower validation accuracy of 0.6064, with an error rate of 0.3936. 
+Holm's method selected the same three predictors as Bonferroni, leading to identical validation performance with an accuracy of 0.6064 and an error of 0.3936. 
+Lastly, controlling the false discovery rate using the Benjamini–Hochberg procedure at q = 0.05 also resulted in the same three-variable model and the same validation metrics. 
+Overall, the model without multiple-testing adjustments provided the best predictive accuracy, while all adjusted models showed slightly higher error rates due to the more restrictive selection of predictors.
+
+
+
+## Interpretation
+
+#### For the strict prediction of diagnosed_diabetes
+
+If the goal is strictly prediction, the model that performs best on the validation set should be chosen, regardless of interpretability or variable selection simplicity. Across all models evaluated, the unadjusted logistic regression achieved the highest validation accuracy (0.6208), outperforming the decision tree, both random forest models, and all of the multiple-testing–adjusted logistic regressions. The random forest models produced similar but slightly lower predictive accuracy, and the decision tree performed worst due to its simplicity and limited structure. Therefore, based on predictive performance alone, I would choose the unadjusted logistic regression model. It uses a moderately sized set of predictors and provides the strongest out-of-sample prediction for diagnosed_diabetes among the approaches considered.
+
+
+#### For the relationship between significant variables and diagnosed_diabetes
+
+If the aim is to understand the relationships between predictors and diagnosed diabetes (rather than maximizing predictive accuracy), interpretability, statistical rigor, and control of false positives should be prioritized. In this case, a logistic regression model with multiple-testing correction is most appropriate. Both the Bonferroni and Holm procedures retained the same three variables (age, physical_activity_minutes_per_week, and family_history_diabetes) and these variables also remained significant under FDR control. This consistency strengthens confidence that these predictors are robustly associated with diagnosed diabetes, even after accounting for multiple comparisons. Although the reduced models do not predict as well as the unadjusted logistic model, they provide cleaner inference by limiting spurious findings. Thus, for the purpose of understanding covariate relationships, I would choose the logistic regression model using the variables that survive Holm or FDR correction, as it balances interpretability with appropriate error control.
+
+
+
+# Principal Components / Hierarchical Clustering
+
+## Principal Components/Loadings/BiPlot
+
+```{r}
+## LE8 variables 
+le8vars <- c(
+  "diet_score",
+  "physical_activity_minutes_per_week",
+  "smoking_status",
+  "sleep_hours_per_day",
+  "bmi",
+  "cholesterol_total",
+  "hdl_cholesterol",
+  "hba1c",
+  "systolic_bp",
+  "diastolic_bp"
+)
+
+df_le8 <- df[, le8vars]
+
+## model.matrix performs one-hot encoding
+X_le8 <- model.matrix(
+  ~ diet_score +
+    physical_activity_minutes_per_week +
+    smoking_status +
+    sleep_hours_per_day +
+    bmi +
+    cholesterol_total +
+    hdl_cholesterol +
+    hba1c +
+    systolic_bp +
+    diastolic_bp,
+  data = df_le8
+)[, -1]   # remove intercept column
+
+
+## PCA with centering and scaling
+le8.pca <- prcomp(X_le8, center = TRUE, scale. = TRUE)
+
+## Eigenvalues and cumulative variance explained
+le8_cve <- le8.pca$sdev^2
+le8_pve <- le8_cve / sum(le8_cve)
+le8_cum_pve <- cumsum(le8_pve)
+
+le8_pve
+le8_cum_pve
+
+## Minimum number of PCs to exceed 75% cumulative variance
+which(le8_cum_pve >= 0.75)[1]
+
+## Scree plot
+par(mfrow = c(1, 2))
+
+## Individual variance explained
+plot(
+  le8_pve,
+  type = "b",
+  xlab = "# of Components",
+  ylab = "Proportion of Variance Explained",
+  main = "Scree Plot"
+)
+
+## Cumulative variance explained
+plot(
+  le8_cum_pve,
+  type = "b",
+  ylim = c(0, 1),
+  xlab = "# of Components",
+  ylab = "Cumulative Proportion Explained",
+  main = "Cumulative Variance Explained"
+)
+abline(h = 0.75, lty = 2)
+
+par(mfrow = c(1, 1))
+
+## Full loadings
+le8.pca$rotation
+
+## Loadings for PC1 and PC2
+round(le8.pca$rotation[, 1:2], 3)
+
+## Helper function for effect-size categories
+effect_cat <- function(x) {
+  ax <- abs(x)
+  case_when(
+    ax < 0.2 ~ "minimal",
+    ax < 0.3 ~ "small",
+    ax < 0.4 ~ "moderate",
+    TRUE     ~ "large"
+  )
+}
+
+## Table for interpreting PC1 and PC2
+pc12_loadings <- as.data.frame(le8.pca$rotation[, 1:2])
+pc12_loadings$PC1_effect <- effect_cat(pc12_loadings$PC1)
+pc12_loadings$PC2_effect <- effect_cat(pc12_loadings$PC2)
+
+pc12_loadings   
+
+
+biplot(le8.pca, scale = 0,
+       xlab = "PC1",
+       ylab = "PC2",
+       main = "Biplot of LE8 PCA")
+```
+
+**Comment:** 
+The PCA was conducted with centering and scaling so that all variables contributed on a comparable scale. Examination of the proportion of variance explained by each component showed that the first few components captured a moderate share of the variation (PC1 = 15.6%, PC2 = 14.6%, PC3 = 10.0%, PC4 = 9.4%). The cumulative variance explained increased steadily, reaching approximately 75.5% after the first seven components. Therefore, seven principal components are required to retain at least 75 percent of the total variation in the LE8 variables. The scree plot and cumulative variance plot both show this point clearly.
+
+**PC1** is primarily defined by the variables related to BMI, cholesterol control, and blood pressure, with several large or moderate loadings across these groups. BMI shows a large positive loading (0.508), indicating that higher BMI strongly increases PC1 scores. Systolic blood pressure (0.412) also contributes a large positive effect, and total cholesterol (0.350) and diastolic blood pressure (0.301) contribute moderate positive effects. HDL cholesterol shows a small negative loading (-0.273), suggesting lower HDL increases PC1. Factors representing tobacco exposure (smoking_statusFormer = 0.260; smoking_statusNever = -0.290) show small contributions but in opposite directions. Diet score (-0.220) and physical activity (-0.123) have small-to-minimal negative effects, and sleep and blood sugar measures (sleep_hours_per_day and hba1c) have minimal influence.
+Overall, PC1 represents a general “cardiometabolic risk” dimension, with higher PC1 scores reflecting higher BMI, higher blood pressure, and higher cholesterol levels, along with modest influence from smoking history.
+
+**PC2** PC2 is defined most strongly by smoking-related variables. Both tobacco indicators show large contributions but in opposite directions: smoking_statusFormer loads negatively (-0.657) and smoking_statusNever loads positively (0.643). This makes smoking behavior the dominant factor separating individuals along the PC2 axis. Diet score (-0.144), physical activity (-0.020), hba1c (0.138), and systolic/diastolic blood pressure have minimal influences. BMI (0.217) and total cholesterol (0.142) contribute small-to-minimal associations. Thus, PC2 primarily represents a “smoking behavior” axis, where higher PC2 values correspond to never-smokers, and lower values correspond to former smokers.
+
+**To summarize,** 
+
+PC1 = a cardiometabolic risk profile (Dominated by BMI, blood pressure, and cholesterol, with moderate influence from smoking category. High PC1 scores reflect unfavorable metabolic and cardiovascular measures.)
+
+PC2 = a smoking-status axis (Driven almost entirely by the two smoking indicator variables, distinguishing never-smokers from former smokers, with minimal contribution from the other LE8 components.)
+
+The biplot displays three visible clusters because the PCA includes the smoking_status factor, which was converted into two indicator variables and implicitly represents three categories: never smokers, former smokers, and current smokers. These smoking indicators have the largest loadings on PC2, causing the three smoking groups to separate distinctly along that axis, while PC1 captures variation in cardiometabolic risk through BMI, blood pressure, and cholesterol levels, creating additional spread within each smoking category. As a result, the combination of a strongly separating categorical variable (smoking status) and continuous variation in metabolic health produces three natural clusters in the biplot.
+
+
+
+## Hierarchical Clustering
+
+```{r}
+## Use the smallest number of PCs that explain at least 75 percent
+pc_keep <- which(le8_cum_pve >= 0.75)[1]
+pc_keep
+
+## PCA scores for the selected components
+pc_scores <- le8.pca$x[, 1:pc_keep]
+
+## Distance matrix
+dist_pc <- dist(pc_scores)
+
+## Hierarchical clustering with three linkage methods
+hc_complete <- hclust(dist_pc, method = "complete")
+hc_average  <- hclust(dist_pc, method = "average")
+hc_single   <- hclust(dist_pc, method = "single")
+
+## Plot dendrograms for each linkage
+par(mfrow = c(1, 3))
+
+plot(hc_complete,
+     main = "Hierarchical Clustering (Complete Linkage)",
+     xlab = "",
+     sub  = "",
+     cex  = 0.6)
+
+plot(hc_average,
+     main = "Hierarchical Clustering (Average Linkage)",
+     xlab = "",
+     sub  = "",
+     cex  = 0.6)
+
+plot(hc_single,
+     main = "Hierarchical Clustering (Single Linkage)",
+     xlab = "",
+     sub  = "",
+     cex  = 0.6)
+
+par(mfrow = c(1, 1))
+
+## Cut each dendrogram into 3 clusters and get cluster sizes
+clust_complete3 <- cutree(hc_complete, k = 3)
+clust_average3  <- cutree(hc_average,  k = 3)
+clust_single3   <- cutree(hc_single,   k = 3)
+
+table(clust_complete3)
+table(clust_average3)
+table(clust_single3)
+
+
+
+## Add complete-linkage cluster membership to the full dataset
+df$cluster_complete3 <- factor(clust_complete3)
+
+## Compute means of all numeric variables by cluster
+cluster_means <- df %>%
+  group_by(cluster_complete3) %>%
+  summarise(
+    across(
+      where(is.numeric),
+      ~ mean(.x, na.rm = TRUE)
+    )
+  )
+
+
+df <- df %>%
+  mutate(
+    smoke_former = ifelse(smoking_status == "Former", 1, 0),
+    smoke_never  = ifelse(smoking_status == "Never", 1, 0)
+  )
+
+cluster_means_le8 <- df %>%
+  group_by(cluster_complete3) %>%
+  summarise(
+    across(
+      c(
+        "diet_score",
+        "physical_activity_minutes_per_week",
+        "sleep_hours_per_day",
+        "bmi",
+        "cholesterol_total",
+        "hdl_cholesterol",
+        "hba1c",
+        "systolic_bp",
+        "diastolic_bp",
+        "smoke_former",
+        "smoke_never",
+        "diagnosed_diabetes"
+      ),
+      ~mean(.x, na.rm = TRUE)
+    )
+  )
+
+print(cluster_means, width = Inf)
+print(cluster_means_le8, width = Inf)
+
+
+
+## Ensure diagnosed_diabetes is coded as 0/1 or factor with two levels
+## For safety, convert to factor here:
+df$diagnosed_diabetes <- as.factor(df$diagnosed_diabetes)
+
+## Fit logistic regression with cluster membership as predictor
+glm_cluster <- glm(
+  diagnosed_diabetes ~ cluster_complete3,
+  data   = df,
+  family = binomial
+)
+
+summary(glm_cluster)
+
+## Predicted class based on 0.5 cutoff
+prob_cluster <- predict(glm_cluster, type = "response")
+
+## If factor levels are "0", "1", map probabilities to those labels
+pred_cluster <- ifelse(prob_cluster >= 0.5, "1", "0")
+pred_cluster <- factor(pred_cluster, levels = levels(df$diagnosed_diabetes))
+
+## Confusion matrix comparing predicted vs observed
+conf_mat_cluster <- confusionMatrix(
+  data      = pred_cluster,
+  reference = df$diagnosed_diabetes
+)
+
+conf_mat_cluster
+```
+
+**Comment:**
+After retaining the first seven principal components, which together explain at least 75 percent of the total variance, hierarchical clustering was performed on the PC score matrix using complete, average, and single linkage methods. The dendrograms for each linkage show visibly different clustering structures, reflecting how each method defines inter-cluster distance. When the trees were cut to form three clusters, the cluster sizes varied substantially depending on the linkage method. Complete linkage produced a relatively balanced distribution across the three clusters (792, 1964, and 2244 individuals), suggesting that it separated groups based on overall dissimilarity across all members. In contrast, average linkage yielded one extremely large cluster (n = 4997) and two very small clusters (n = 2 and n = 1), and single linkage exhibited the same pattern (n = 4998, 1, and 1), indicating severe chaining and poor separation of meaningful groups. These results show that complete linkage is the only method that forms interpretable and non-degenerate clusters in this dataset.
+
+Using the complete-linkage solution with three clusters, the mean profiles of the variables revealed clear behavioral and cardiometabolic distinctions across clusters. Cluster 1 showed the highest physical activity levels (about 179 minutes per week), relatively favorable diet scores, and intermediate BMI and blood pressure, suggesting a more physically active and moderately healthy group. Cluster 2 had the lowest physical activity (around 91 minutes), the lowest diet scores, and the highest BMI, systolic and diastolic blood pressure, and triglycerides, representing a higher metabolic risk profile. Cluster 3 was younger on average, with physical activity levels between clusters 1 and 2, the lowest BMI, the highest HDL cholesterol, and the lowest total cholesterol and triglycerides, reflecting a comparatively healthier lipid and body composition profile. Smoking patterns also differed, with Cluster 3 having the highest proportion of never smokers and the lowest proportion of former smokers. Together, these results indicate that complete-linkage clustering separated individuals into groups that meaningfully differ in activity patterns, adiposity, lipid profiles, and related cardiometabolic characteristics.
+
+Using cluster membership as the sole predictor in a logistic regression model resulted in modest discrimination of diagnosed diabetes. The model identified a significantly higher odds of diabetes in Cluster 2 compared with Cluster 1, while Cluster 3 did not differ meaningfully from the reference group. However, this limited separation among clusters translated into relatively low predictive performance. The overall accuracy was about 0.596, only slightly above the no-information rate of 0.587, and the Kappa statistic of 0.177 indicated poor agreement beyond chance. Sensitivity and specificity were balanced but modest, and the confusion matrix showed substantial misclassification in both directions.
+
+Compared with the supervised learning methods in Problem 1, this accuracy is somewhat lower. In Problem 1, the classification tree achieved an accuracy of about 0.57, while the random forest models reached around 0.59–0.60, and logistic regression models using individual predictors achieved similar or slightly higher levels depending on variable selection. Because cluster membership is derived from unsupervised learning and does not directly optimize prediction of diagnosed diabetes, this reduced accuracy is expected. Overall, the clustering-based model does not outperform the supervised models, reinforcing that unsupervised grouping is not an effective predictor of diabetes in this dataset.
+

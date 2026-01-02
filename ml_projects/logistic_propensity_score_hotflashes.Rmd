@@ -1,0 +1,295 @@
+---
+title: "Logistic Regression & Propensity Score Adjustment for Racial Differences in Hot Flashes"
+author: "Hajin Jang"
+Date: "4/2/2024"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: '3'
+    code_folding: show
+---
+
+### This project evaluates racial differences in self-reported hot flashes using logistic regression, penalized variable selection, propensity score adjustment, and model performance metrics such as ROC curves and AUC.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(error = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(here)
+library(car)
+library(pROC)
+library(glmnet)
+library(glmtoolbox)
+library(nnet)
+
+```
+
+
+## 0. Load the data
+
+The following data description comes from https://www.causeweb.org/tshs/hot-flashes/: 
+
+Menopause heralds a complex array of hormonal and physiologic changes, the most common of which is the feverish discomfort of hot flashes and often accompanied by sweating, chills and anxiety. The Mayo Clinic defines a hot flash as the “sudden feeling of warmth in the upper body which is usually most intense over the face, neck and chest”. Among women in the menopausal transition, hot flashes typically occur daily, are between 2-5 minutes duration, and can be expected to persist for more than 7 years  Variations in hot flash experiences during the menopausal transition among different populations have been observed but are incompletely understood.
+
+The aim of this project is to explore race differences in self-reported hot flashes while considering other factors such as demographic information, BMI, reproductive hormone levels, and smoking.
+
+```{r}
+# read in the data
+data0 <- read_excel("hflash.xlsx")
+data0$ageg <- factor(data0$ageg)
+
+# drop missing values
+data <- drop_na(data0)
+```
+
+
+## 1. Simple logistic regression model
+
+__Fitting a logistic regression model with race as the predictor and self-reported hot flashes as the outcome.__
+
+```{r}
+# fit logistic regression model with race
+m1 <- glm(hotflash ~ aagrp, data = data, family = binomial(link = "logit"))
+
+# model output
+summary(m1)
+
+# exponentiated coefficient
+exp(coef(m1))
+```
+
+**Interpretation:** Race was significantly associated with hot flash (p-value=0.005). The odds of self-reported hot flashes among African Americans were 1.894 times the odds of self-reported hot flashes among Caucasians.
+
+
+## 2. Multiple logistic regression model
+
+__Fitting a logistic regression model for self-reported hot flashes (outcome) using race, age group, education, smoking status, pcs12, obesity status, estradiol, FSH, LH, testosterone, and dehydroepiandrosterone sulfate as predictors.__
+
+```{r}
+# fit logistic regression model with all predictors mentioned
+m2 <- glm(hotflash ~ aagrp + ageg + edu + f1a + pcs12 + bmi30 + estra + fsh + lh + testo + dheas, data = data, family = binomial(link = "logit"))
+
+# print output
+summary(m2)
+```
+
+**Comment:** After adjusting for other covariates, the association between race and self-reported hot flashes was no longer significant (p-value=0.214).
+
+
+## 3. Sensitivity and specificity
+
+__Calculating the sensitivity and specificity using the thresholds 0.25, 0.5, and 0.75.__
+
+```{r}
+phat = predict(m2, type = "response")
+y = m2$y
+
+# threshold 1 (0.25)
+thresh1 = 0.25
+yhat1 = as.numeric(phat > thresh1) 
+data.frame(predicted = yhat1, observed = y) %>% xtabs(~ predicted + observed, data = .)
+## Sensitivity & Specificity
+80/(33+80) ; 123/(123+126)
+
+# threshold 2 (0.5)
+thresh2 = 0.5
+yhat2 = as.numeric(phat > thresh2) 
+data.frame(predicted = yhat2, observed = y) %>% xtabs(~ predicted + observed, data = .)
+## Sensitivity & Specificity
+26/(87+26) ; 237/(237+12)
+
+# threshold 3 (0.75)
+thresh3 = 0.75
+yhat3 = as.numeric(phat > thresh3) 
+data.frame(predicted = yhat3, observed = y) %>% xtabs(~ predicted + observed, data = .)
+## Sensitivity & Specificity
+4/(109+4) ; 249/(249+0)
+```
+
+**Comment:** As the threshold increased, sensitivity decreased while specificity increased.
+
+
+## 4. ROC curve
+
+__Constructing an ROC curve for the model.__
+
+```{r}
+# ROC curve
+y_obs = m2$y
+phat = predict(m2, type = "response")
+roc_curve = roc(response = y_obs, predictor = phat)
+
+# plot ROC curve
+plot(roc_curve, main = "ROC Curve", col = "blue")
+```
+
+**Comment:** The ROC curve is above the solid line but is still close to the random line, meaning that the model is not that ideal.
+
+
+## 5. AUC 
+
+__Calculating the AUC.__
+
+```{r}
+# AUC value
+auc(roc_curve)
+```
+
+**Interpretation:** The probability that a randomly selected case has a higher predicted probability from model 2 than a randomly selected control is 0.6838.
+
+
+## 6. Shrinkage methods
+
+__Fitting a cross-validated lasso logistic regression model to help account for possible overfitting.__
+
+```{r}
+set.seed(1234)
+
+# predictor matrix
+X = model.matrix(m2)[,-1]
+Y = m2$model$hotflash
+
+# using AUC as the measure of fit
+# lasso
+lasso.auc = cv.glmnet(x = X, y = Y, nfolds = 10 , family = "binomial", alpha = 1, type.measure = "auc")
+lasso.auc
+
+# show output 
+plot(lasso.auc)
+```
+
+**Interpretation:** The AUC for cross-validated lasso model is 0.6317. This is slightly lower compared to that of the original logistic model. This means that the model 2 could be a bit over-fitted.
+
+
+## 7. Determine variables to keep
+
+__With the biggest lambda penalty value that gives us an AUC within 1 standard error of the best AUC using the lasso method.__ 
+
+```{r}
+# grab coefficients
+coef(lasso.auc, "lambda.1se")
+```
+
+**Interpretation:** Pcs12, bmi30, and fsh were kept in the model. Race was not kept in the model. This is consistent with the result of part 2.
+
+
+## 8. Lasso with deviance
+
+__Fitting the lasso model again, but this time using deviance as the model fit metric.__
+
+```{r}
+# lasso with deviance
+set.seed(1234)
+
+lasso.dev = cv.glmnet(x = X, y = Y, nfolds = 10 , family = "binomial", alpha = 1)
+lasso.dev
+
+# compare covariates kept in the model
+coef(lasso.dev,"lambda.1se")
+```
+
+**Comment:** The result was the same as what we got from part 7. Using either auc or deviance metric would yield the same conclusion.
+
+
+## 9. Propensity Score Model
+
+__Fitting a propensity score model for race as the outcome using the remaining predictors from the model above.__
+
+```{r}
+# fit the propensity score model
+propensity_model <- glm(aagrp ~ pcs12 + bmi30 + fsh, data = data, family = binomial(link = "logit"))
+
+# show model output
+summary(propensity_model)
+```
+
+**Comment:** Pcs12 and bmi30 were significantly associated with race in the model, with p-value=0.001 for psc12 and 5.37e-06 for bmi30.
+
+
+## 10. Adjusting for propensity scores
+
+__Calculating the propensity scores using the model above and using the propensity scores as a predictor, along with race, in a model for self-reported hot flashes.__
+
+```{r}
+# calculate and save propensity scores
+pscores <- predict(propensity_model, type = "response")
+data <- data %>% mutate(pscore = pscores)
+
+# fit model
+m3 <- glm(hotflash ~ aagrp + pscore, data = data, family = binomial(link = "logit"))
+
+# print output
+summary(m3)
+```
+
+**Interpretation:** The log odds for self-reported hot flashes among Caucasians were -2.303. The log odds of self-reported hot flashes comparing African Americans to Caucasians were 0.345, while keeping propensity scores constant.
+
+
+## 11. Check Linearity
+
+__Checking the linearity condition.__
+
+```{r}
+# check linearity condition
+crPlots(m3, terms = ~ pscore)
+```
+
+**Interpretation:** The magenta line was not aligning well with the blue dotted line, indicating that the linearity assumption was violated.
+
+
+## 12. Propensity Score Quintiles
+
+__Breaking the propensity scores into quintiles to use this as a categorical predictor of self-reported hot flashes in addition to race.__
+
+```{r}
+# split propensity scores into quintiles
+pscores_cat = cut(pscores, breaks = quantile(pscores, probs = (0:5)/5), include.lowest = TRUE, labels = paste0("Q",1:5))
+
+data$pscore_cat = pscores_cat
+
+data %>% 
+  ggplot(aes(x = pscore_cat, y = pscore)) + 
+  geom_boxplot() + 
+  theme_bw()
+
+# fit model
+m4 <- glm(hotflash ~ aagrp + pscore_cat, data = data, family = binomial(link = "logit"))
+
+# print output
+summary(m4)
+```
+
+**Interpretation:** The log odds for self-reported hot flashes among Caucasians were -1.463. The log odds for self-reported hot flashes comparing African Americans to Caucasians were 0.373, while keeping propensity score quintiles constant.
+
+
+## 13. Compare Models
+
+__Simple logistic regression model with just race vs. multiple logistic regression adjusting for all covariates separately vs. the model adjusting for race and propensity score as a numeric variable vs. the model adjusting for race and propensity score quintiles__
+
+```{r}
+broom::glance(m1)
+broom::glance(m2)
+broom::glance(m3)
+broom::glance(m4)
+```
+
+**Comment:** I prefer the last model (m4) adjusting for race and propensity score quintiles. The model 2 and model 3 had lower AIC, but the model 2 had a high probability of over-fitting while the model 3 also had an issue of violating the linearity assumption. The model 4 addressed and solved the aforementioned problems and showed low AIC and BIC as well.
+
+
+## 14. Summary
+
+At first, race was significantly associated with self-reported hot flashes. However, the association was disappeared when other covariates were adjusted in the model. After going through the variable selection by cross-validated lasso regression, the auc was approximately 0.7 showing moderate to good discrimination. After all, the final model which performed the best included race and propensity score quintiles.
+
+
+
+```{r}
+
+sessionInfo()
+
+```
